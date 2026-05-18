@@ -1,0 +1,24 @@
+# Rust build output
+/target/
+
+# Release and installer artifacts
+/dist/
+*.exe
+*.msi
+*.pdb
+*.stamp
+*.log
+
+# Local editor settings
+/.vscode/
+
+# OS and shell noise
+Thumbs.db
+Desktop.ini
+*.tmp
+*.bak
+
+# Environment files
+.env
+.env.*
+!.env.example
