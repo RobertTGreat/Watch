@@ -1,10 +1,13 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+mod allanime;
+
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     ffi::OsStr,
     fs::{self, OpenOptions},
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
+    ops::Range,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{Arc, Mutex},
@@ -15,12 +18,14 @@ use std::{
 use std::os::windows::process::CommandExt;
 
 use gpui::{
-    actions, canvas, div, ease_in_out, img, linear_color_stop, linear_gradient, point, prelude::*,
-    px, relative, rgb, size, svg, Animation, AnimationExt, AnyElement, App, Bounds, Context, Div,
-    ExternalPaths, FocusHandle, Focusable, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ObjectFit, PathPromptOptions, Pixels, Point, Render, ScrollDelta,
-    ScrollWheelEvent, SharedString, TitlebarOptions, Transformation, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowOptions,
+    actions, canvas, div, ease_in_out, fill, img, linear_color_stop, linear_gradient, point,
+    prelude::*, px, relative, rgb, rgba, size, svg, Animation, AnimationExt, AnyElement, App,
+    Bounds, ClipboardItem, Context, CursorStyle, Div, Element, ElementId, ElementInputHandler,
+    Entity, EntityInputHandler, ExternalPaths, FocusHandle, Focusable, GlobalElementId, KeyBinding,
+    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, PaintQuad,
+    PathPromptOptions, Pixels, Point, Render, ScrollDelta, ScrollHandle, ScrollWheelEvent,
+    ShapedLine, SharedString, Style, TextRun, TitlebarOptions, Transformation, UTF16Selection,
+    UnderlineStyle, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions,
 };
 use gpui_platform::application;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -43,6 +48,7 @@ const OLED_BLACK: u32 = 0x000000;
 const APP_NAME: &str = "Watch";
 const APP_ID: &str = "Watch";
 const WATCH_PLAYER_KEY_CONTEXT: &str = "WatchPlayer";
+const WATCH_DIALOG_KEY_CONTEXT: &str = "WatchDialog";
 const PLAYER_BLACK: u32 = 0x030303;
 const MENU_BLACK: u32 = 0x080808;
 const SOFT_WHITE: u32 = 0xf5f5f5;
@@ -94,6 +100,7 @@ const LIBRARY_BASE_VIEWPORT_HEIGHT_PX: f32 = 920.0;
 const LIBRARY_MIN_UI_SCALE: f32 = 1.0;
 const LIBRARY_MAX_UI_SCALE: f32 = 2.35;
 const MAX_LIBRARY_THUMBNAILS_TO_GENERATE: usize = 12;
+const REMOTE_THUMBNAIL_DOWNLOAD_TIMEOUT_SECONDS: u64 = 15;
 const LIBRARY_TITLE_LINE_HEIGHT_PX: f32 = 18.0;
 const LIBRARY_TITLE_AVERAGE_CHARACTER_WIDTH_PX: f32 = 7.2;
 const LIBRARY_TITLE_SCROLL_END_PADDING_PX: f32 = 24.0;
@@ -103,6 +110,12 @@ const CONTEXT_MENU_WIDTH: f32 = 300.0;
 const LIBRARY_CONTEXT_MENU_WIDTH: f32 = 220.0;
 const LIBRARY_CONTEXT_MENU_ESTIMATED_HEIGHT: f32 = 48.0;
 const SETTINGS_MODAL_WIDTH: f32 = 480.0;
+const SOURCE_SEARCH_BAR_WIDTH: f32 = 760.0;
+const SOURCE_SEARCH_RESULT_MAX_HEIGHT: f32 = 340.0;
+const SOURCE_PROVIDER_SETTINGS_MAX_HEIGHT: f32 = 132.0;
+const ALLANIME_PROVIDER_ID: &str = "builtin-allanime";
+const ALLANIME_PROVIDER_NAME: &str = "AllAnime";
+const ALLANIME_SOURCE_URL_PREFIX: &str = "allanime://";
 const LIVE_CAPTURE_DROPDOWN_WIDTH: f32 = 360.0;
 const LIBRARY_ACTION_GROUP_ESTIMATED_WIDTH: f32 = 448.0;
 const LIBRARY_LIVE_CAPTURE_OVERLAY_TOP: f32 = 74.0;
@@ -132,6 +145,8 @@ const THUMBNAIL_CACHE_DIRECTORY_NAME: &str = "timeline-thumbnails";
 const LIBRARY_FLUSH_INTERVAL_MS: u128 = 5_000;
 const THUMBNAIL_CACHE_MAX_BYTES: u64 = 512 * 1024 * 1024;
 const THUMBNAIL_WORKER_COUNT: usize = 2;
+const REMOTE_THUMBNAIL_USER_AGENT: &str =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
 const ICON_PLAY: &str = "play.svg";
 const ICON_PAUSE: &str = "pause.svg";
 const ICON_NEXT: &str = "next.svg";
@@ -144,6 +159,8 @@ const ICON_VOLUME_MUTED: &str = "volume-x.svg";
 const ICON_SHUFFLE: &str = "shuffle.svg";
 const ICON_REPEAT: &str = "repeat.svg";
 const ICON_SETTINGS: &str = "settings.svg";
+const ICON_SEARCH: &str = "search.svg";
+const ICON_GLOBE: &str = "globe.svg";
 const ICON_CHEVRON_LEFT: &str = "chevron-left.svg";
 const ICON_CHEVRON_RIGHT: &str = "chevron-right.svg";
 const ICON_CHEVRON_UP: &str = "chevron-up.svg";
@@ -213,6 +230,33 @@ actions!(
     ]
 );
 
+actions!(
+    source_text_input,
+    [
+        Backspace,
+        Delete,
+        Left,
+        Right,
+        SelectLeft,
+        SelectRight,
+        SelectAll,
+        Home,
+        End,
+        Paste,
+        Cut,
+        Copy
+    ]
+);
+
+actions!(
+    source_browser,
+    [
+        SubmitSourceSearch,
+        SelectPreviousSourceResult,
+        SelectNextSourceResult
+    ]
+);
+
 #[derive(Clone)]
 struct AudioOutputDeviceOption {
     label: String,
@@ -245,10 +289,82 @@ struct LiveCaptureDeviceScan {
     audio_devices: Vec<LiveCaptureAudioDevice>,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+struct SourceProvider {
+    id: String,
+    name: String,
+    search_url_template: String,
+    #[serde(default)]
+    episodes_url_template: Option<String>,
+    #[serde(default)]
+    streams_url_template: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct InternetMediaHttpHeader {
+    name: String,
+    value: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct InternetMedia {
+    provider_id: String,
+    provider_name: String,
+    title: String,
+    #[serde(default)]
+    series_title: Option<String>,
+    #[serde(default)]
+    episode_title: Option<String>,
+    #[serde(default)]
+    episode_number: Option<String>,
+    subtitle: Option<String>,
+    stream_url: String,
+    thumbnail_url: Option<String>,
+    #[serde(default)]
+    http_headers: Vec<InternetMediaHttpHeader>,
+}
+
+#[derive(Clone)]
+struct SourceSearchResult {
+    provider: SourceProvider,
+    item_id: Option<String>,
+    title: String,
+    subtitle: Option<String>,
+    episodes_url: Option<String>,
+    streams_url: Option<String>,
+    direct_media: Option<InternetMedia>,
+    thumbnail_url: Option<String>,
+}
+
+#[derive(Clone)]
+struct SourceEpisodeResult {
+    provider: SourceProvider,
+    series_title: String,
+    item_id: Option<String>,
+    title: String,
+    subtitle: Option<String>,
+    streams_url: Option<String>,
+    direct_media: Option<InternetMedia>,
+}
+
+#[derive(Clone)]
+struct SourceStreamResult {
+    media: InternetMedia,
+    quality: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SourceBrowserView {
+    SearchResults,
+    Episodes,
+    Streams,
+}
+
 #[derive(Clone)]
 enum LoadedMediaSource {
     File(PathBuf),
     LiveCapture(LiveCaptureDevice),
+    Internet(InternetMedia),
 }
 
 #[derive(Clone)]
@@ -265,6 +381,7 @@ impl LoadedMedia {
         match &self.source {
             LoadedMediaSource::File(path) => Some(path),
             LoadedMediaSource::LiveCapture(_) => None,
+            LoadedMediaSource::Internet(_) => None,
         }
     }
 
@@ -274,6 +391,7 @@ impl LoadedMedia {
             LoadedMediaSource::LiveCapture(device) => {
                 format!("Live Capture: {}", device.display_name)
             }
+            LoadedMediaSource::Internet(media) => media.title.clone(),
         }
     }
 
@@ -281,6 +399,10 @@ impl LoadedMedia {
         match &self.source {
             LoadedMediaSource::File(path) => path.display().to_string(),
             LoadedMediaSource::LiveCapture(device) => device.detail_label(),
+            LoadedMediaSource::Internet(media) => media
+                .subtitle
+                .clone()
+                .unwrap_or_else(|| media.provider_name.clone()),
         }
     }
 
@@ -290,6 +412,7 @@ impl LoadedMedia {
             LoadedMediaSource::LiveCapture(device) => {
                 format!("Live Capture: {}", device.display_name)
             }
+            LoadedMediaSource::Internet(media) => media.title.clone(),
         }
     }
 
@@ -300,6 +423,43 @@ impl LoadedMedia {
             }
             LoadedMediaSource::LiveCapture(device) => {
                 device.append_mpv_input_args(command, settings);
+            }
+            LoadedMediaSource::Internet(media) => {
+                if !media.http_headers.is_empty() {
+                    if let Some(user_agent) = media
+                        .http_headers
+                        .iter()
+                        .find(|header| header.name.eq_ignore_ascii_case("user-agent"))
+                        .map(|header| header.value.trim())
+                        .filter(|value| !value.is_empty())
+                    {
+                        command.arg(format!("--user-agent={user_agent}"));
+                    }
+                    if let Some(referrer) = media
+                        .http_headers
+                        .iter()
+                        .find(|header| header.name.eq_ignore_ascii_case("referer"))
+                        .map(|header| header.value.trim())
+                        .filter(|value| !value.is_empty())
+                    {
+                        command.arg(format!("--referrer={referrer}"));
+                    }
+                    let header_fields = media
+                        .http_headers
+                        .iter()
+                        .filter(|header| !header.name.is_empty() && !header.value.is_empty())
+                        .filter(|header| {
+                            !header.name.eq_ignore_ascii_case("user-agent")
+                                && !header.name.eq_ignore_ascii_case("referer")
+                        })
+                        .map(|header| format!("{}: {}", header.name, header.value))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    if !header_fields.is_empty() {
+                        command.arg(format!("--http-header-fields={header_fields}"));
+                    }
+                }
+                command.arg(&media.stream_url);
             }
         }
     }
@@ -312,10 +472,17 @@ impl LoadedMedia {
         matches!(self.source, LoadedMediaSource::LiveCapture(_))
     }
 
+    fn internet_media(&self) -> Option<&InternetMedia> {
+        match &self.source {
+            LoadedMediaSource::Internet(media) => Some(media),
+            LoadedMediaSource::File(_) | LoadedMediaSource::LiveCapture(_) => None,
+        }
+    }
+
     fn live_capture_device(&self) -> Option<&LiveCaptureDevice> {
         match &self.source {
             LoadedMediaSource::LiveCapture(device) => Some(device),
-            LoadedMediaSource::File(_) => None,
+            LoadedMediaSource::File(_) | LoadedMediaSource::Internet(_) => None,
         }
     }
 }
@@ -590,6 +757,8 @@ struct PlayerSettings {
     #[serde(default = "default_volume_step_percent")]
     volume_step_percent: i16,
     #[serde(default)]
+    source_providers: Vec<SourceProvider>,
+    #[serde(default)]
     window_bounds: Option<SavedWindowBounds>,
     #[serde(default)]
     schema_version: u32,
@@ -615,6 +784,7 @@ impl Default for PlayerSettings {
             subtitle_position_percent: 95,
             seek_step_seconds: DEFAULT_SEEK_STEP_SECONDS,
             volume_step_percent: DEFAULT_VOLUME_STEP_PERCENT,
+            source_providers: Vec::new(),
             window_bounds: None,
             schema_version: 1,
         }
@@ -703,12 +873,23 @@ struct MediaHistoryEntry {
     selected_subtitle_path: Option<PathBuf>,
 }
 
+#[derive(Clone)]
+struct InternetMediaHistoryEntry {
+    media: InternetMedia,
+    playback_position_seconds: f64,
+    duration_seconds: Option<f64>,
+    is_completed: bool,
+    updated_at_millis: u128,
+}
+
 #[derive(Clone, Default)]
 struct PlayerLibrary {
     recent_media_paths: Vec<PathBuf>,
     recent_folder_paths: Vec<PathBuf>,
     pinned_folder_paths: Vec<PathBuf>,
     media_history: Vec<MediaHistoryEntry>,
+    recent_internet_media: Vec<InternetMedia>,
+    internet_media_history: Vec<InternetMediaHistoryEntry>,
 }
 
 #[derive(Clone)]
@@ -718,8 +899,11 @@ struct LibraryGridItem {
     subtitle: Option<String>,
     episode_badge: Option<String>,
     thumbnail_media_path: Option<PathBuf>,
+    thumbnail_url: Option<String>,
+    internet_media: Option<InternetMedia>,
     resume_history_entry: Option<MediaHistoryEntry>,
     is_watched: bool,
+    is_internet_media: bool,
     can_remove_from_continue_watching: bool,
 }
 
@@ -942,6 +1126,8 @@ struct WatchPlayer {
     is_settings_modal_open: bool,
     is_library_open: bool,
     is_live_capture_menu_open: bool,
+    is_source_search_open: bool,
+    is_source_search_pending: bool,
     is_live_capture_scan_pending: bool,
     is_audio_output_scan_pending: bool,
     show_unwatched_only: bool,
@@ -949,6 +1135,7 @@ struct WatchPlayer {
     subtitle_menu_anchor: Option<Point<Pixels>>,
     library_context_menu_anchor: Option<Point<Pixels>>,
     library_context_menu_media_path: Option<PathBuf>,
+    library_context_menu_internet_media: Option<InternetMedia>,
     hovered_continue_remove_media_path: Option<PathBuf>,
     exiting_continue_remove_media_path: Option<PathBuf>,
     continue_remove_scale_animation_generation: u64,
@@ -969,6 +1156,21 @@ struct WatchPlayer {
     audio_output_devices: Vec<AudioOutputDeviceOption>,
     live_capture_devices: Vec<LiveCaptureDevice>,
     live_capture_audio_devices: Vec<LiveCaptureAudioDevice>,
+    source_search_input: Entity<InlineTextInput>,
+    source_provider_input: Entity<InlineTextInput>,
+    source_search_results: Vec<SourceSearchResult>,
+    source_episode_results: Vec<SourceEpisodeResult>,
+    source_stream_results: Vec<SourceStreamResult>,
+    source_browser_view: SourceBrowserView,
+    selected_source_result_index: usize,
+    source_search_scroll_handle: ScrollHandle,
+    source_episode_scroll_handle: ScrollHandle,
+    source_stream_scroll_handle: ScrollHandle,
+    selected_source_series_title: Option<String>,
+    selected_source_episode_title: Option<String>,
+    selected_source_thumbnail_url: Option<String>,
+    last_source_search_query: String,
+    source_search_status: Option<SharedString>,
     library_shelf_offsets: HashMap<String, usize>,
     collapsed_library_shelf_keys: HashSet<String>,
     dependency_status: DependencyStatus,
@@ -1002,6 +1204,13 @@ impl WatchPlayer {
             .unwrap_or_else(|| {
                 "Open a real media file or folder to populate the player.".to_string()
             });
+        let source_search_input = cx.new(|cx| InlineTextInput::new("Search providers", cx));
+        let source_provider_input = cx.new(|cx| {
+            InlineTextInput::new(
+                "Name | search URL {query} | episodes URL {id} | streams URL {episode_id}",
+                cx,
+            )
+        });
         let mut player = Self {
             focus_handle: cx.focus_handle(),
             playback_queue: Vec::new(),
@@ -1033,6 +1242,8 @@ impl WatchPlayer {
             is_settings_modal_open: false,
             is_library_open: initial_media_paths.is_empty(),
             is_live_capture_menu_open: false,
+            is_source_search_open: false,
+            is_source_search_pending: false,
             is_live_capture_scan_pending: false,
             is_audio_output_scan_pending: false,
             show_unwatched_only: false,
@@ -1040,6 +1251,7 @@ impl WatchPlayer {
             subtitle_menu_anchor: None,
             library_context_menu_anchor: None,
             library_context_menu_media_path: None,
+            library_context_menu_internet_media: None,
             hovered_continue_remove_media_path: None,
             exiting_continue_remove_media_path: None,
             continue_remove_scale_animation_generation: 0,
@@ -1060,6 +1272,21 @@ impl WatchPlayer {
             audio_output_devices: default_audio_output_options(),
             live_capture_devices: Vec::new(),
             live_capture_audio_devices: Vec::new(),
+            source_search_input,
+            source_provider_input,
+            source_search_results: Vec::new(),
+            source_episode_results: Vec::new(),
+            source_stream_results: Vec::new(),
+            source_browser_view: SourceBrowserView::SearchResults,
+            selected_source_result_index: 0,
+            source_search_scroll_handle: ScrollHandle::new(),
+            source_episode_scroll_handle: ScrollHandle::new(),
+            source_stream_scroll_handle: ScrollHandle::new(),
+            selected_source_series_title: None,
+            selected_source_episode_title: None,
+            selected_source_thumbnail_url: None,
+            last_source_search_query: String::new(),
+            source_search_status: None,
             library_shelf_offsets: HashMap::new(),
             collapsed_library_shelf_keys: HashSet::new(),
             dependency_status,
@@ -1125,7 +1352,7 @@ impl WatchPlayer {
 
     fn current_media_duration_seconds(&self) -> Option<f64> {
         self.current_media()
-            .filter(|media| media.is_seekable_file())
+            .filter(|media| !media.is_live_capture())
             .and_then(|media| media.duration_seconds)
             .filter(|duration_seconds| duration_seconds.is_finite() && *duration_seconds > 0.0)
     }
@@ -1176,6 +1403,15 @@ impl WatchPlayer {
     }
 
     fn record_current_media_progress(&mut self) {
+        if let Some(internet_media) = self
+            .current_media()
+            .and_then(LoadedMedia::internet_media)
+            .cloned()
+        {
+            self.record_current_internet_media_progress(internet_media);
+            return;
+        }
+
         let Some(current_media_path) = self.current_media_path() else {
             return;
         };
@@ -1218,6 +1454,44 @@ impl WatchPlayer {
         self.mark_library_dirty();
     }
 
+    fn record_current_internet_media_progress(&mut self, internet_media: InternetMedia) {
+        let duration_seconds = self.current_media_duration_seconds();
+        let playback_position_seconds = self.playback_position_seconds.max(0.0);
+        let is_completed = duration_seconds
+            .map(|duration_seconds| {
+                playback_position_seconds >= duration_seconds * COMPLETED_MEDIA_FRACTION
+                    || duration_seconds - playback_position_seconds
+                        <= COMPLETED_MEDIA_REMAINING_SECONDS
+            })
+            .unwrap_or(false);
+        let current_internet_media_key = internet_media_key(&internet_media);
+
+        self.library
+            .internet_media_history
+            .retain(|entry| internet_media_key(&entry.media) != current_internet_media_key);
+        self.library.internet_media_history.insert(
+            0,
+            InternetMediaHistoryEntry {
+                media: internet_media.clone(),
+                playback_position_seconds,
+                duration_seconds,
+                is_completed,
+                updated_at_millis: current_time_millis(),
+            },
+        );
+        self.library
+            .internet_media_history
+            .truncate(MAX_RECENT_MEDIA * 2);
+        promote_recent_internet_media(
+            &mut self.library.recent_internet_media,
+            internet_media,
+            MAX_RECENT_MEDIA,
+        );
+        self.is_library_dirty = true;
+        self.last_recorded_progress_seconds = playback_position_seconds;
+        self.mark_library_dirty();
+    }
+
     fn flush_player_library_if_due(&mut self, force: bool) {
         if !self.is_library_dirty {
             return;
@@ -1235,6 +1509,20 @@ impl WatchPlayer {
     }
 
     fn remember_current_queue_in_library(&mut self) {
+        let internet_media = self
+            .playback_queue
+            .iter()
+            .filter_map(|media| media.internet_media().cloned())
+            .collect::<Vec<_>>();
+
+        for media in internet_media {
+            promote_recent_internet_media(
+                &mut self.library.recent_internet_media,
+                media,
+                MAX_RECENT_MEDIA,
+            );
+        }
+
         let media_paths = self
             .playback_queue
             .iter()
@@ -1571,6 +1859,7 @@ impl WatchPlayer {
                     && !player.is_main_menu_open
                     && !player.is_subtitle_menu_open
                     && !player.is_settings_modal_open
+                    && !player.is_source_search_open
                     && !player.is_pointer_over_player_overlay
                 {
                     player.are_controls_visible = false;
@@ -2209,6 +2498,7 @@ impl WatchPlayer {
         self.subtitle_menu_anchor = None;
         self.library_context_menu_anchor = None;
         self.library_context_menu_media_path = None;
+        self.library_context_menu_internet_media = None;
         self.open_context_menu_section = None;
         self.reveal_controls(window, cx);
     }
@@ -2223,10 +2513,12 @@ impl WatchPlayer {
         self.is_main_menu_open = false;
         self.is_live_capture_menu_open = false;
         self.is_settings_modal_open = false;
+        self.is_source_search_open = false;
         self.open_settings_selector = None;
         self.subtitle_menu_anchor = Some(anchor);
         self.library_context_menu_anchor = None;
         self.library_context_menu_media_path = None;
+        self.library_context_menu_internet_media = None;
         self.open_context_menu_section = None;
         self.reveal_controls(window, cx);
     }
@@ -2236,10 +2528,12 @@ impl WatchPlayer {
         self.is_subtitle_menu_open = false;
         self.is_live_capture_menu_open = false;
         self.is_settings_modal_open = false;
+        self.is_source_search_open = false;
         self.open_settings_selector = None;
         self.subtitle_menu_anchor = None;
         self.library_context_menu_anchor = None;
         self.library_context_menu_media_path = None;
+        self.library_context_menu_internet_media = None;
         self.open_context_menu_section = None;
         self.reveal_controls(window, cx);
     }
@@ -2250,7 +2544,11 @@ impl WatchPlayer {
         self.is_main_menu_open = false;
         self.is_subtitle_menu_open = false;
         self.is_live_capture_menu_open = false;
+        self.is_source_search_open = false;
         self.subtitle_menu_anchor = None;
+        self.library_context_menu_anchor = None;
+        self.library_context_menu_media_path = None;
+        self.library_context_menu_internet_media = None;
         self.open_context_menu_section = None;
         self.reveal_controls(window, cx);
     }
@@ -2261,6 +2559,576 @@ impl WatchPlayer {
         cx.notify();
     }
 
+    fn open_source_search_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.is_source_search_open = true;
+        self.is_main_menu_open = false;
+        self.is_subtitle_menu_open = false;
+        self.is_live_capture_menu_open = false;
+        self.is_settings_modal_open = false;
+        self.open_settings_selector = None;
+        self.subtitle_menu_anchor = None;
+        self.library_context_menu_anchor = None;
+        self.library_context_menu_media_path = None;
+        self.library_context_menu_internet_media = None;
+        self.open_context_menu_section = None;
+        self.source_search_status = Some("Search AllAnime and saved providers.".into());
+        window.focus(&self.source_search_input.focus_handle(cx), cx);
+        self.reveal_controls(window, cx);
+    }
+
+    fn close_source_search_overlay(&mut self, cx: &mut Context<Self>) {
+        self.is_source_search_open = false;
+        self.is_source_search_pending = false;
+        self.source_search_results.clear();
+        self.source_episode_results.clear();
+        self.source_stream_results.clear();
+        self.source_browser_view = SourceBrowserView::SearchResults;
+        self.selected_source_result_index = 0;
+        self.selected_source_series_title = None;
+        self.selected_source_episode_title = None;
+        self.selected_source_thumbnail_url = None;
+        self.source_search_status = None;
+        cx.notify();
+    }
+
+    fn add_source_provider_from_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let provider_input = self.source_provider_input.read(cx).text();
+        let Some(provider) = source_provider_from_input(&provider_input) else {
+            self.source_search_status =
+                Some("Enter a provider as Name | search URL | optional episodes URL | optional streams URL.".into());
+            cx.notify();
+            return;
+        };
+
+        upsert_source_provider(&mut self.settings.source_providers, provider.clone());
+        save_player_settings(&self.settings);
+        self.source_provider_input
+            .update(cx, |input, cx| input.clear(cx));
+        self.status_message = Some(format!("Source provider added: {}", provider.name).into());
+        self.source_search_status = Some("Provider added. Search for a title when ready.".into());
+        let next_focus_handle = if self.is_source_search_open {
+            self.source_search_input.focus_handle(cx)
+        } else {
+            self.source_provider_input.focus_handle(cx)
+        };
+        window.focus(&next_focus_handle, cx);
+        cx.notify();
+    }
+
+    fn remove_source_provider(&mut self, provider_id: String, cx: &mut Context<Self>) {
+        self.settings
+            .source_providers
+            .retain(|provider| provider.id != provider_id);
+        save_player_settings(&self.settings);
+        self.source_search_results.clear();
+        self.source_episode_results.clear();
+        self.source_stream_results.clear();
+        self.source_browser_view = SourceBrowserView::SearchResults;
+        self.selected_source_result_index = 0;
+        self.selected_source_series_title = None;
+        self.selected_source_episode_title = None;
+        self.selected_source_thumbnail_url = None;
+        self.source_search_status = Some("Source provider removed.".into());
+        cx.notify();
+    }
+
+    fn submit_source_search_or_selection(
+        &mut self,
+        _: &SubmitSourceSearch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.is_source_search_open || self.is_source_search_pending {
+            return;
+        }
+
+        if available_source_provider_count(&self.settings) == 0 {
+            self.add_source_provider_from_input(window, cx);
+            return;
+        }
+
+        let search_query = self.source_search_input.read(cx).text().trim().to_string();
+        let should_search = self.source_browser_view == SourceBrowserView::SearchResults
+            && (self.source_search_results.is_empty()
+                || search_query != self.last_source_search_query);
+
+        if should_search {
+            self.search_source_providers(window, cx);
+        } else {
+            self.confirm_selected_source_result(window, cx);
+        }
+    }
+
+    fn select_previous_source_result(
+        &mut self,
+        _: &SelectPreviousSourceResult,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.shift_selected_source_result(-1, cx);
+    }
+
+    fn select_next_source_result(
+        &mut self,
+        _: &SelectNextSourceResult,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.shift_selected_source_result(1, cx);
+    }
+
+    fn shift_selected_source_result(&mut self, direction: i32, cx: &mut Context<Self>) {
+        if !self.is_source_search_open || self.is_source_search_pending {
+            return;
+        }
+
+        let result_count = self.active_source_result_count();
+        if result_count == 0 {
+            self.selected_source_result_index = 0;
+            cx.notify();
+            return;
+        }
+
+        let max_index = result_count.saturating_sub(1);
+        self.selected_source_result_index = if direction < 0 {
+            self.selected_source_result_index.saturating_sub(1)
+        } else {
+            (self.selected_source_result_index + 1).min(max_index)
+        };
+        self.scroll_selected_source_result_into_view();
+        cx.notify();
+    }
+
+    fn active_source_result_count(&self) -> usize {
+        match self.source_browser_view {
+            SourceBrowserView::SearchResults => self.source_search_results.len(),
+            SourceBrowserView::Episodes => self.source_episode_results.len(),
+            SourceBrowserView::Streams => self.source_stream_results.len(),
+        }
+    }
+
+    fn active_source_scroll_handle(&self) -> &ScrollHandle {
+        match self.source_browser_view {
+            SourceBrowserView::SearchResults => &self.source_search_scroll_handle,
+            SourceBrowserView::Episodes => &self.source_episode_scroll_handle,
+            SourceBrowserView::Streams => &self.source_stream_scroll_handle,
+        }
+    }
+
+    fn scroll_selected_source_result_into_view(&self) {
+        if self.active_source_result_count() > 0 {
+            self.active_source_scroll_handle()
+                .scroll_to_item(self.selected_source_result_index);
+        }
+    }
+
+    fn clamp_selected_source_result_index(&mut self) {
+        let result_count = self.active_source_result_count();
+        if result_count == 0 {
+            self.selected_source_result_index = 0;
+        } else {
+            self.selected_source_result_index =
+                self.selected_source_result_index.min(result_count - 1);
+        }
+    }
+
+    fn confirm_selected_source_result(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.clamp_selected_source_result_index();
+        match self.source_browser_view {
+            SourceBrowserView::SearchResults => {
+                if let Some(search_result) = self
+                    .source_search_results
+                    .get(self.selected_source_result_index)
+                    .cloned()
+                {
+                    self.load_source_search_result(search_result, window, cx);
+                }
+            }
+            SourceBrowserView::Episodes => {
+                if let Some(episode_result) = self
+                    .source_episode_results
+                    .get(self.selected_source_result_index)
+                    .cloned()
+                {
+                    self.load_source_episode_result(episode_result, window, cx);
+                }
+            }
+            SourceBrowserView::Streams => {
+                if let Some(stream_result) = self
+                    .source_stream_results
+                    .get(self.selected_source_result_index)
+                    .cloned()
+                {
+                    self.load_source_stream_result(stream_result, window, cx);
+                }
+            }
+        }
+    }
+
+    fn search_source_providers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let source_providers = available_source_providers(&self.settings.source_providers);
+        if source_providers.is_empty() {
+            self.source_search_status =
+                Some("No source provider set. Add one here to enable search.".into());
+            window.focus(&self.source_provider_input.focus_handle(cx), cx);
+            cx.notify();
+            return;
+        }
+
+        let search_query = self.source_search_input.read(cx).text().trim().to_string();
+        if search_query.is_empty() {
+            self.source_search_status = Some("Enter a title to search.".into());
+            window.focus(&self.source_search_input.focus_handle(cx), cx);
+            cx.notify();
+            return;
+        }
+
+        self.is_source_search_pending = true;
+        self.source_search_results.clear();
+        self.source_episode_results.clear();
+        self.source_stream_results.clear();
+        self.source_browser_view = SourceBrowserView::SearchResults;
+        self.selected_source_result_index = 0;
+        self.selected_source_series_title = None;
+        self.selected_source_episode_title = None;
+        self.selected_source_thumbnail_url = None;
+        self.last_source_search_query = search_query.clone();
+        self.source_search_status = Some("Searching source providers...".into());
+        cx.notify();
+
+        let search_task = cx.background_spawn(async move {
+            search_configured_source_providers(source_providers, search_query)
+        });
+
+        cx.spawn_in(window, async move |this, cx| {
+            let search_results = search_task.await;
+
+            let _ = this.update_in(cx, |player, _window, cx| {
+                player.is_source_search_pending = false;
+                match search_results {
+                    Ok(results) => {
+                        let result_count = results.len();
+                        player.source_search_results = results;
+                        player.selected_source_result_index = 0;
+                        player.scroll_selected_source_result_into_view();
+                        player.source_search_status = Some(
+                            if result_count == 0 {
+                                "No source results found.".to_string()
+                            } else {
+                                format!("{result_count} source result(s).")
+                            }
+                            .into(),
+                        );
+                    }
+                    Err(error_message) => {
+                        player.source_search_results.clear();
+                        player.source_search_status = Some(error_message.into());
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn load_source_search_result(
+        &mut self,
+        search_result: SourceSearchResult,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.selected_source_thumbnail_url = search_result.thumbnail_url.clone();
+
+        if let Some(mut direct_media) = search_result.direct_media.clone() {
+            apply_source_media_metadata(
+                &mut direct_media,
+                &search_result.title,
+                None,
+                search_result.thumbnail_url.clone(),
+            );
+            self.load_internet_media(direct_media, window, cx);
+            return;
+        }
+
+        if source_search_result_has_episode_step(&search_result) {
+            self.fetch_source_episodes(search_result, window, cx);
+            return;
+        }
+
+        if source_search_result_has_stream_step(&search_result) {
+            self.fetch_source_streams_for_series(search_result, window, cx);
+            return;
+        }
+
+        self.source_search_status =
+            Some("This result has no playable stream or episode endpoint.".into());
+        cx.notify();
+    }
+
+    fn load_source_episode_result(
+        &mut self,
+        episode_result: SourceEpisodeResult,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(mut direct_media) = episode_result.direct_media.clone() {
+            apply_source_media_metadata(
+                &mut direct_media,
+                &episode_result.series_title,
+                Some(&episode_result.title),
+                self.selected_source_thumbnail_url.clone(),
+            );
+            self.load_internet_media(direct_media, window, cx);
+            return;
+        }
+
+        if source_episode_result_has_stream_step(&episode_result) {
+            self.fetch_source_streams_for_episode(episode_result, window, cx);
+            return;
+        }
+
+        self.source_search_status = Some("This episode has no playable stream endpoint.".into());
+        cx.notify();
+    }
+
+    fn load_source_stream_result(
+        &mut self,
+        stream_result: SourceStreamResult,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut internet_media = stream_result.media;
+        if internet_media.thumbnail_url.is_none() {
+            internet_media.thumbnail_url = self.selected_source_thumbnail_url.clone();
+        }
+        self.load_internet_media(internet_media, window, cx);
+    }
+
+    fn fetch_source_episodes(
+        &mut self,
+        search_result: SourceSearchResult,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(episodes_url) = source_search_result_episodes_url(&search_result) else {
+            self.source_search_status = Some("This provider did not return an episode URL.".into());
+            cx.notify();
+            return;
+        };
+        let provider = search_result.provider.clone();
+        let series_title = search_result.title.clone();
+
+        self.is_source_search_pending = true;
+        self.source_episode_results.clear();
+        self.source_stream_results.clear();
+        self.source_browser_view = SourceBrowserView::Episodes;
+        self.selected_source_result_index = 0;
+        self.selected_source_series_title = Some(series_title.clone());
+        self.selected_source_episode_title = None;
+        self.selected_source_thumbnail_url = search_result.thumbnail_url.clone();
+        self.source_search_status = Some(format!("Loading episodes for {series_title}...").into());
+        cx.notify();
+
+        let episode_task = cx.background_spawn(async move {
+            fetch_source_episode_results(&provider, &series_title, &episodes_url)
+        });
+
+        cx.spawn_in(window, async move |this, cx| {
+            let episode_results = episode_task.await;
+
+            let _ = this.update_in(cx, |player, _window, cx| {
+                player.is_source_search_pending = false;
+                match episode_results {
+                    Ok(results) => {
+                        let episode_count = results.len();
+                        player.source_episode_results = results;
+                        player.selected_source_result_index = 0;
+                        player.scroll_selected_source_result_into_view();
+                        player.source_search_status = Some(
+                            if episode_count == 0 {
+                                "No episodes found.".to_string()
+                            } else {
+                                format!("{episode_count} episode(s).")
+                            }
+                            .into(),
+                        );
+                    }
+                    Err(error_message) => {
+                        player.source_episode_results.clear();
+                        player.source_search_status = Some(error_message.into());
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn fetch_source_streams_for_series(
+        &mut self,
+        search_result: SourceSearchResult,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(streams_url) = source_search_result_streams_url(&search_result) else {
+            self.source_search_status = Some("This provider did not return a stream URL.".into());
+            cx.notify();
+            return;
+        };
+        let provider = search_result.provider.clone();
+        let series_title = search_result.title.clone();
+
+        self.fetch_source_streams(provider, series_title, None, streams_url, window, cx);
+    }
+
+    fn fetch_source_streams_for_episode(
+        &mut self,
+        episode_result: SourceEpisodeResult,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(streams_url) = source_episode_result_streams_url(&episode_result) else {
+            self.source_search_status = Some("This provider did not return a stream URL.".into());
+            cx.notify();
+            return;
+        };
+        let provider = episode_result.provider.clone();
+        let series_title = episode_result.series_title.clone();
+        let episode_title = episode_result.title.clone();
+
+        self.fetch_source_streams(
+            provider,
+            series_title,
+            Some(episode_title),
+            streams_url,
+            window,
+            cx,
+        );
+    }
+
+    fn fetch_source_streams(
+        &mut self,
+        provider: SourceProvider,
+        series_title: String,
+        episode_title: Option<String>,
+        streams_url: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let status_title = episode_title
+            .clone()
+            .unwrap_or_else(|| series_title.clone());
+        self.is_source_search_pending = true;
+        self.source_stream_results.clear();
+        self.source_browser_view = SourceBrowserView::Streams;
+        self.selected_source_result_index = 0;
+        self.selected_source_series_title = Some(series_title.clone());
+        self.selected_source_episode_title = episode_title.clone();
+        self.source_search_status = Some(format!("Loading streams for {status_title}...").into());
+        cx.notify();
+
+        let stream_task = cx.background_spawn(async move {
+            fetch_source_stream_results(
+                &provider,
+                &series_title,
+                episode_title.as_deref(),
+                &streams_url,
+            )
+        });
+
+        cx.spawn_in(window, async move |this, cx| {
+            let stream_results = stream_task.await;
+
+            let _ = this.update_in(cx, |player, _window, cx| {
+                player.is_source_search_pending = false;
+                match stream_results {
+                    Ok(mut results) => {
+                        let thumbnail_url = player.selected_source_thumbnail_url.clone();
+                        for stream_result in &mut results {
+                            if stream_result.media.thumbnail_url.is_none() {
+                                stream_result.media.thumbnail_url = thumbnail_url.clone();
+                            }
+                        }
+                        let stream_count = results.len();
+                        player.source_stream_results = results;
+                        player.selected_source_result_index = 0;
+                        player.scroll_selected_source_result_into_view();
+                        player.source_search_status = Some(
+                            if stream_count == 0 {
+                                "No playable streams found.".to_string()
+                            } else {
+                                format!("{stream_count} stream source(s).")
+                            }
+                            .into(),
+                        );
+                    }
+                    Err(error_message) => {
+                        player.source_stream_results.clear();
+                        player.source_search_status = Some(error_message.into());
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn show_source_search_results(&mut self, cx: &mut Context<Self>) {
+        self.source_browser_view = SourceBrowserView::SearchResults;
+        self.source_stream_results.clear();
+        self.source_episode_results.clear();
+        self.selected_source_result_index = 0;
+        self.selected_source_series_title = None;
+        self.selected_source_episode_title = None;
+        self.selected_source_thumbnail_url = None;
+        self.source_search_status = Some("Search source providers.".into());
+        self.scroll_selected_source_result_into_view();
+        cx.notify();
+    }
+
+    fn show_source_episode_results(&mut self, cx: &mut Context<Self>) {
+        self.source_browser_view = SourceBrowserView::Episodes;
+        self.source_stream_results.clear();
+        self.selected_source_result_index = 0;
+        self.selected_source_episode_title = None;
+        self.source_search_status = Some("Select an episode.".into());
+        self.scroll_selected_source_result_into_view();
+        cx.notify();
+    }
+
+    fn load_internet_media(
+        &mut self,
+        internet_media: InternetMedia,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending_watch_session = None;
+        clear_saved_watch_session();
+        self.record_current_media_progress();
+        self.flush_player_library_if_due(true);
+        self.stop_playback_process();
+        self.playback_queue = vec![build_internet_media(internet_media.clone())];
+        self.current_queue_index = Some(0);
+        self.selected_audio_track_id = None;
+        self.selected_subtitle_path = None;
+        self.selected_embedded_subtitle_track_id = None;
+        self.playback_position_seconds = 0.0;
+        self.is_eof_reached = false;
+        self.is_library_open = false;
+        self.is_live_capture_menu_open = false;
+        self.is_source_search_open = false;
+        promote_recent_internet_media(
+            &mut self.library.recent_internet_media,
+            internet_media,
+            MAX_RECENT_MEDIA,
+        );
+        self.mark_library_dirty();
+        save_player_library_atomic(&self.library);
+        self.schedule_internet_library_thumbnail_cache(window, cx);
+        self.start_current_media_playback(window, cx);
+        self.reveal_controls(window, cx);
+    }
+
     fn show_library_context_menu(
         &mut self,
         media_path: PathBuf,
@@ -2269,10 +3137,32 @@ impl WatchPlayer {
     ) {
         self.library_context_menu_anchor = Some(anchor);
         self.library_context_menu_media_path = Some(media_path);
+        self.library_context_menu_internet_media = None;
         self.is_main_menu_open = false;
         self.is_subtitle_menu_open = false;
         self.is_live_capture_menu_open = false;
         self.is_settings_modal_open = false;
+        self.is_source_search_open = false;
+        self.open_settings_selector = None;
+        self.subtitle_menu_anchor = None;
+        self.open_context_menu_section = None;
+        cx.notify();
+    }
+
+    fn show_internet_library_context_menu(
+        &mut self,
+        internet_media: InternetMedia,
+        anchor: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.library_context_menu_anchor = Some(anchor);
+        self.library_context_menu_media_path = Some(internet_media_library_path(&internet_media));
+        self.library_context_menu_internet_media = Some(internet_media);
+        self.is_main_menu_open = false;
+        self.is_subtitle_menu_open = false;
+        self.is_live_capture_menu_open = false;
+        self.is_settings_modal_open = false;
+        self.is_source_search_open = false;
         self.open_settings_selector = None;
         self.subtitle_menu_anchor = None;
         self.open_context_menu_section = None;
@@ -2282,6 +3172,7 @@ impl WatchPlayer {
     fn close_library_context_menu(&mut self, cx: &mut Context<Self>) {
         self.library_context_menu_anchor = None;
         self.library_context_menu_media_path = None;
+        self.library_context_menu_internet_media = None;
         cx.notify();
     }
 
@@ -2316,6 +3207,7 @@ impl WatchPlayer {
         self.are_controls_visible = false;
         self.library_context_menu_anchor = None;
         self.library_context_menu_media_path = None;
+        self.library_context_menu_internet_media = None;
         self.timeline_hover_preview = None;
         self.schedule_library_thumbnail_generation(window, cx);
         cx.notify();
@@ -2335,9 +3227,11 @@ impl WatchPlayer {
         self.is_subtitle_menu_open = false;
         self.is_live_capture_menu_open = false;
         self.is_settings_modal_open = false;
+        self.is_source_search_open = false;
         self.open_settings_selector = None;
         self.library_context_menu_anchor = None;
         self.library_context_menu_media_path = None;
+        self.library_context_menu_internet_media = None;
         self.open_context_menu_section = None;
         self.timeline_hover_preview = None;
         self.pending_timeline_thumbnail_key = None;
@@ -2350,6 +3244,15 @@ impl WatchPlayer {
     }
 
     fn schedule_library_thumbnail_generation(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.schedule_local_library_thumbnail_generation(window, cx);
+        self.schedule_internet_library_thumbnail_cache(window, cx);
+    }
+
+    fn schedule_local_library_thumbnail_generation(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -2367,10 +3270,44 @@ impl WatchPlayer {
             return;
         }
 
-        cx.spawn_in(window, async move |this, cx| {
+        let thumbnail_task = cx.background_spawn(async move {
             generate_library_thumbnails_bounded(ffmpeg_path, media_paths);
             prune_thumbnail_cache();
+        });
 
+        cx.spawn_in(window, async move |this, cx| {
+            thumbnail_task.await;
+            let _ = this.update_in(cx, |_player, _window, cx| {
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn schedule_internet_library_thumbnail_cache(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let thumbnail_urls = internet_library_thumbnail_urls(&self.library)
+            .into_iter()
+            .filter(|thumbnail_url| existing_remote_thumbnail_path(thumbnail_url).is_none())
+            .take(MAX_LIBRARY_THUMBNAILS_TO_GENERATE)
+            .collect::<Vec<_>>();
+
+        if thumbnail_urls.is_empty() {
+            return;
+        }
+
+        let thumbnail_task = cx.background_spawn(async move {
+            for thumbnail_url in thumbnail_urls {
+                let _ = cache_remote_thumbnail(&thumbnail_url);
+            }
+            prune_thumbnail_cache();
+        });
+
+        cx.spawn_in(window, async move |this, cx| {
+            thumbnail_task.await;
             let _ = this.update_in(cx, |_player, _window, cx| {
                 cx.notify();
             });
@@ -2464,6 +3401,7 @@ impl WatchPlayer {
         self.open_settings_selector = None;
         self.library_context_menu_anchor = None;
         self.library_context_menu_media_path = None;
+        self.library_context_menu_internet_media = None;
         self.open_context_menu_section = None;
 
         if self.is_live_capture_menu_open && self.live_capture_devices.is_empty() {
@@ -3783,6 +4721,9 @@ impl WatchPlayer {
             .when(self.is_settings_modal_open, |surface| {
                 surface.child(self.render_settings_modal(cx))
             })
+            .when(self.is_source_search_open, |surface| {
+                surface.child(self.render_source_search_overlay(cx))
+            })
     }
 
     fn render_osd_toast(&self, message: SharedString) -> impl IntoElement {
@@ -4008,6 +4949,7 @@ impl WatchPlayer {
                             .child(
                                 div()
                                     .flex()
+                                    .items_center()
                                     .gap(px(8.0 * library_scale))
                                     .child(self.render_live_capture_device_dropdown_button(
                                         library_scale,
@@ -4045,6 +4987,16 @@ impl WatchPlayer {
                                         cx,
                                         |player, window, cx| {
                                             player.open_folder_picker(window, cx);
+                                        },
+                                    ))
+                                    .child(prompt_icon_action_button(
+                                        "library-source-search",
+                                        ICON_SEARCH,
+                                        "Search source providers",
+                                        library_scale,
+                                        cx,
+                                        |player, window, cx| {
+                                            player.open_source_search_overlay(window, cx);
                                         },
                                     )),
                             ),
@@ -4822,6 +5774,67 @@ impl WatchPlayer {
         cx.notify();
     }
 
+    fn internet_media_for_library_path(&self, media_path: &Path) -> Option<InternetMedia> {
+        self.library
+            .recent_internet_media
+            .iter()
+            .find(|media| internet_media_library_path(media) == media_path)
+            .cloned()
+            .or_else(|| {
+                self.library
+                    .internet_media_history
+                    .iter()
+                    .map(|entry| &entry.media)
+                    .find(|media| internet_media_library_path(media) == media_path)
+                    .cloned()
+            })
+    }
+
+    fn remove_internet_media_from_library(
+        &mut self,
+        internet_media: InternetMedia,
+        cx: &mut Context<Self>,
+    ) {
+        let removed_media_key = internet_media_key(&internet_media);
+        let removed_media_path = internet_media_library_path(&internet_media);
+        let is_current_media_removed = self
+            .current_media()
+            .and_then(LoadedMedia::internet_media)
+            .is_some_and(|current_media| internet_media_key(current_media) == removed_media_key);
+
+        self.library.recent_internet_media.retain(|media| {
+            internet_media_key(media) != removed_media_key
+                && internet_media_library_path(media) != removed_media_path
+        });
+        self.library.internet_media_history.retain(|entry| {
+            internet_media_key(&entry.media) != removed_media_key
+                && internet_media_library_path(&entry.media) != removed_media_path
+        });
+
+        if is_current_media_removed {
+            self.pending_watch_session = None;
+            clear_saved_watch_session();
+            self.playback_progress_generation = self.playback_progress_generation.wrapping_add(1);
+            self.stop_playback_process();
+            self.playback_queue.clear();
+            self.current_queue_index = None;
+            self.selected_audio_track_id = None;
+            self.selected_subtitle_path = None;
+            self.selected_embedded_subtitle_track_id = None;
+            self.playback_position_seconds = 0.0;
+            self.is_playing = false;
+            self.is_eof_reached = false;
+        }
+
+        self.library_context_menu_anchor = None;
+        self.library_context_menu_media_path = None;
+        self.library_context_menu_internet_media = None;
+        self.status_message = Some("Removed from Source.".into());
+        self.mark_library_dirty();
+        save_player_library_atomic(&self.library);
+        cx.notify();
+    }
+
     fn mark_library_media_watched(&mut self, media_path: PathBuf, cx: &mut Context<Self>) {
         let media_path_key = library_media_path_key(&media_path);
         let duration_seconds = self
@@ -4865,6 +5878,7 @@ impl WatchPlayer {
         );
         self.library_context_menu_anchor = None;
         self.library_context_menu_media_path = None;
+        self.library_context_menu_internet_media = None;
         self.status_message = Some("Marked watched.".into());
         self.mark_library_dirty();
         save_player_library_atomic(&self.library);
@@ -4906,6 +5920,7 @@ impl WatchPlayer {
         );
         self.library_context_menu_anchor = None;
         self.library_context_menu_media_path = None;
+        self.library_context_menu_internet_media = None;
         self.status_message = Some("Marked unwatched.".into());
         self.mark_library_dirty();
         save_player_library_atomic(&self.library);
@@ -4963,10 +5978,14 @@ impl WatchPlayer {
             .library_context_menu_media_path
             .clone()
             .unwrap_or_default();
+        let internet_media = self
+            .library_context_menu_internet_media
+            .clone()
+            .or_else(|| self.internet_media_for_library_path(&media_path));
         let (menu_left, menu_top) =
             self.library_context_menu_origin(viewport_width, viewport_height);
 
-        div()
+        let menu = div()
             .id("library-context-menu")
             .absolute()
             .left(px(menu_left))
@@ -4984,8 +6003,18 @@ impl WatchPlayer {
             .flex()
             .flex_col()
             .gap_1()
-            .text_color(rgb(SOFT_WHITE))
-            .child(simple_menu_action("Mark Watched", cx, {
+            .text_color(rgb(SOFT_WHITE));
+
+        if let Some(internet_media) = internet_media {
+            menu.child(simple_menu_action(
+                "Remove",
+                cx,
+                move |player, _window, cx| {
+                    player.remove_internet_media_from_library(internet_media.clone(), cx);
+                },
+            ))
+        } else {
+            menu.child(simple_menu_action("Mark Watched", cx, {
                 let media_path = media_path.clone();
                 move |player, _window, cx| {
                     player.mark_library_media_watched(media_path.clone(), cx);
@@ -5011,6 +6040,7 @@ impl WatchPlayer {
                     player.pin_library_folder(folder_path, cx);
                 }
             }))
+        }
     }
 
     fn library_context_menu_origin(&self, viewport_width: f32, viewport_height: f32) -> (f32, f32) {
@@ -5051,6 +6081,8 @@ impl WatchPlayer {
         let item_path_for_remove_hover = item.path.clone();
         let item_path_for_context_menu = item.path.clone();
         let resume_history_entry = item.resume_history_entry.clone();
+        let internet_media_for_click = item.internet_media.clone();
+        let internet_media_for_context_menu = item.internet_media.clone();
         let can_remove_from_continue_watching = item.can_remove_from_continue_watching;
         let is_continue_remove_hovered =
             self.hovered_continue_remove_media_path.as_ref() == Some(&item.path);
@@ -5059,6 +6091,7 @@ impl WatchPlayer {
         let continue_remove_scale_animation_generation =
             self.continue_remove_scale_animation_generation;
         let is_watched = item.is_watched;
+        let is_internet_media = item.is_internet_media;
         let episode_badge = item.episode_badge.clone();
         let has_episode_badge = episode_badge.is_some();
         let item_title = item.title.clone();
@@ -5072,7 +6105,26 @@ impl WatchPlayer {
             .thumbnail_media_path
             .as_ref()
             .and_then(|media_path| existing_library_thumbnail_path(media_path));
-        let has_thumbnail = thumbnail_path.is_some();
+        let remote_thumbnail_path = item
+            .thumbnail_url
+            .as_deref()
+            .and_then(existing_remote_thumbnail_path);
+        let thumbnail_url = if remote_thumbnail_path.is_none() {
+            item.thumbnail_url.clone()
+        } else {
+            None
+        };
+        let has_thumbnail =
+            thumbnail_path.is_some() || remote_thumbnail_path.is_some() || thumbnail_url.is_some();
+        let empty_thumbnail_label = if is_internet_media {
+            item.title
+                .chars()
+                .find(|character| character.is_ascii_alphanumeric())
+                .map(|character| character.to_ascii_uppercase().to_string())
+                .unwrap_or_else(|| "S".to_string())
+        } else {
+            "Folder".to_string()
+        };
         let placeholder_label = item
             .title
             .chars()
@@ -5097,6 +6149,8 @@ impl WatchPlayer {
             .on_click(cx.listener(move |player, _, window, cx| {
                 if let Some(resume_history_entry) = resume_history_entry.clone() {
                     player.continue_library_entry(resume_history_entry, window, cx);
+                } else if let Some(internet_media) = internet_media_for_click.clone() {
+                    player.load_internet_media(internet_media, window, cx);
                 } else {
                     player.load_library_path(item_path_for_click.clone(), window, cx);
                 }
@@ -5112,35 +6166,103 @@ impl WatchPlayer {
                     .border_1()
                     .border_color(rgb(FINE_BORDER))
                     .hover(|thumbnail| thumbnail.border_color(rgb(BRIGHT_BORDER)))
+                    .when(is_internet_media, |frame| {
+                        frame.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .right_0()
+                                .bottom_0()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_color(rgb(MUTED_TEXT))
+                                .text_size(px(12.0 * library_scale))
+                                .line_height(px(16.0 * library_scale))
+                                .child(empty_thumbnail_label.clone()),
+                        )
+                    })
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(move |player, event: &MouseDownEvent, _window, cx| {
-                            player.show_library_context_menu(
-                                item_path_for_context_menu.clone(),
-                                event.position,
-                                cx,
-                            );
+                            if let Some(internet_media) = internet_media_for_context_menu.clone() {
+                                player.show_internet_library_context_menu(
+                                    internet_media,
+                                    event.position,
+                                    cx,
+                                );
+                            } else {
+                                player.show_library_context_menu(
+                                    item_path_for_context_menu.clone(),
+                                    event.position,
+                                    cx,
+                                );
+                            }
                             cx.stop_propagation();
                         }),
                     )
                     .when_some(thumbnail_path, |frame, thumbnail_path| {
                         frame.child(
-                            img(thumbnail_path)
-                                .w_full()
-                                .h_full()
-                                .object_fit(ObjectFit::Cover),
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .right_0()
+                                .bottom_0()
+                                .child(
+                                    img(thumbnail_path)
+                                        .w_full()
+                                        .h_full()
+                                        .object_fit(ObjectFit::Cover),
+                                ),
                         )
                     })
-                    .when(item.thumbnail_media_path.is_none(), |frame| {
-                        frame
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_color(rgb(MUTED_TEXT))
-                            .text_size(px(12.0 * library_scale))
-                            .line_height(px(16.0 * library_scale))
-                            .child("Folder")
+                    .when_some(remote_thumbnail_path, |frame, remote_thumbnail_path| {
+                        frame.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .right_0()
+                                .bottom_0()
+                                .child(
+                                    img(remote_thumbnail_path)
+                                        .w_full()
+                                        .h_full()
+                                        .object_fit(ObjectFit::Cover),
+                                ),
+                        )
                     })
+                    .when_some(thumbnail_url, |frame, thumbnail_url| {
+                        frame.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .right_0()
+                                .bottom_0()
+                                .child(
+                                    img(thumbnail_url)
+                                        .w_full()
+                                        .h_full()
+                                        .object_fit(ObjectFit::Cover),
+                                ),
+                        )
+                    })
+                    .when(
+                        !is_internet_media && !has_thumbnail && item.thumbnail_media_path.is_none(),
+                        |frame| {
+                            frame
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_color(rgb(MUTED_TEXT))
+                                .text_size(px(12.0 * library_scale))
+                                .line_height(px(16.0 * library_scale))
+                                .child(empty_thumbnail_label)
+                        },
+                    )
                     .when(
                         item.thumbnail_media_path.is_some() && !has_thumbnail,
                         |frame| {
@@ -5227,6 +6349,36 @@ impl WatchPlayer {
                                     continue_remove_scale_animation_generation,
                                     library_scale,
                                 )),
+                        )
+                    })
+                    .when(is_internet_media, |frame| {
+                        frame.child(
+                            div()
+                                .id(format!("library-internet-badge-{}", item_path.display()))
+                                .absolute()
+                                .top(px(8.0 * library_scale))
+                                .right(px(8.0 * library_scale))
+                                .w(px(30.0 * library_scale))
+                                .h(px(30.0 * library_scale))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .bg(if self.settings.is_backdrop_blur_enabled {
+                                    rgb_alpha(OLED_BLACK, BACKDROP_BLUR_MENU_BACKGROUND_ALPHA)
+                                } else {
+                                    rgb_alpha(OLED_BLACK, 0.88)
+                                })
+                                .border_1()
+                                .border_color(rgb_alpha(SOFT_WHITE, 0.46))
+                                .text_color(rgb(SOFT_WHITE))
+                                .shadow_lg()
+                                .child(
+                                    svg()
+                                        .external_path(crate::icon_path(ICON_GLOBE))
+                                        .w(px(17.0 * library_scale))
+                                        .h(px(17.0 * library_scale))
+                                        .text_color(rgb(SOFT_WHITE)),
+                                ),
                         )
                     })
                     .when_some(episode_badge, |frame, episode_badge| {
@@ -5350,6 +6502,15 @@ impl WatchPlayer {
                     .flex()
                     .items_center()
                     .gap_2()
+                    .child(icon_button(
+                        "source-search",
+                        ICON_SEARCH,
+                        "Search source providers",
+                        cx,
+                        |player, window, cx| {
+                            player.open_source_search_overlay(window, cx);
+                        },
+                    ))
                     .child(icon_button(
                         "fullscreen",
                         fullscreen_icon_path,
@@ -5945,6 +7106,574 @@ impl WatchPlayer {
             })
     }
 
+    fn render_source_search_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let provider_count = available_source_provider_count(&self.settings);
+        let has_source_providers = provider_count > 0;
+        let status_message = self
+            .source_search_status
+            .clone()
+            .unwrap_or_else(|| "Search source providers.".into());
+
+        div()
+            .id("source-search-overlay")
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .child(
+                div()
+                    .id("source-search-clickoff")
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .bg(gpui::transparent_black())
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|player, _event, _window, cx| {
+                            player.close_source_search_overlay(cx);
+                            cx.stop_propagation();
+                        }),
+                    ),
+            )
+            .child(
+                div()
+                    .id("source-search-powerbar")
+                    .absolute()
+                    .top(px(18.0))
+                    .left_0()
+                    .right_0()
+                    .flex()
+                    .justify_center()
+                    .child(
+                        div()
+                            .w(px(SOURCE_SEARCH_BAR_WIDTH))
+                            .max_w(relative(0.92))
+                            .p_3()
+                            .bg(self.settings.surface_background_color(
+                                MENU_BLACK,
+                                BACKDROP_BLUR_MODAL_BACKGROUND_ALPHA,
+                            ))
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(rgb(BRIGHT_BORDER))
+                            .shadow_lg()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .text_color(rgb(SOFT_WHITE))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|_player, _event, _window, cx| {
+                                    cx.stop_propagation();
+                                }),
+                            )
+                            .on_scroll_wheel(cx.listener(
+                                |_player, _event: &ScrollWheelEvent, _window, cx| {
+                                    cx.stop_propagation();
+                                },
+                            ))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        svg()
+                                            .external_path(crate::icon_path(ICON_SEARCH))
+                                            .w(px(18.0))
+                                            .h(px(18.0))
+                                            .text_color(rgb(SOFT_WHITE)),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .child(if has_source_providers {
+                                                self.source_search_input.clone().into_any_element()
+                                            } else {
+                                                self.source_provider_input
+                                                    .clone()
+                                                    .into_any_element()
+                                            }),
+                                    )
+                                    .when(has_source_providers, |row| {
+                                        row.child(prompt_action_button(
+                                            "source-search-submit",
+                                            if self.is_source_search_pending {
+                                                "Searching"
+                                            } else {
+                                                "Search"
+                                            },
+                                            true,
+                                            1.0,
+                                            cx,
+                                            |player, window, cx| {
+                                                player.search_source_providers(window, cx);
+                                            },
+                                        ))
+                                    })
+                                    .when(!has_source_providers, |row| {
+                                        row.child(prompt_action_button(
+                                            "source-provider-add-from-search",
+                                            "Add Source",
+                                            true,
+                                            1.0,
+                                            cx,
+                                            |player, window, cx| {
+                                                player.add_source_provider_from_input(window, cx);
+                                            },
+                                        ))
+                                    })
+                                    .child(context_icon_button(
+                                        "source-search-close",
+                                        ICON_X,
+                                        "Close search",
+                                        cx,
+                                        |player, _window, cx| {
+                                            player.close_source_search_overlay(cx);
+                                        },
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .text_xs()
+                                    .text_color(rgb(MUTED_TEXT))
+                                    .child(status_message)
+                                    .when(provider_count > 0, |row| {
+                                        row.child(div().flex_1()).child(format!(
+                                            "{provider_count} provider(s)"
+                                        ))
+                                    }),
+                            )
+                            .when(!has_source_providers, |bar| {
+                                bar.child(
+                                    div()
+                                        .text_xs()
+                                        .line_height(px(16.0))
+                                        .text_color(rgb(MUTED_TEXT))
+                                        .child("Use templates with {query}, {id}, and {episode_id}; JSON can return series, episodes, streams, or direct media."),
+                                )
+                            })
+                            .when(has_source_providers, |bar| {
+                                bar.child(self.render_source_browser_navigation(cx))
+                                    .child(self.render_source_browser_content(cx))
+                            }),
+                    ),
+            )
+    }
+
+    fn render_source_browser_navigation(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("source-browser-navigation")
+            .flex()
+            .items_center()
+            .gap_2()
+            .when(
+                self.source_browser_view == SourceBrowserView::Episodes,
+                |row| {
+                    row.child(source_back_button(
+                        "source-back-to-search",
+                        "Search",
+                        cx,
+                        |player, _window, cx| {
+                            player.show_source_search_results(cx);
+                        },
+                    ))
+                },
+            )
+            .when(
+                self.source_browser_view == SourceBrowserView::Streams,
+                |row| {
+                    row.child(source_back_button(
+                        "source-back-to-episodes",
+                        if self.source_episode_results.is_empty() {
+                            "Search"
+                        } else {
+                            "Episodes"
+                        },
+                        cx,
+                        |player, _window, cx| {
+                            if player.source_episode_results.is_empty() {
+                                player.show_source_search_results(cx);
+                            } else {
+                                player.show_source_episode_results(cx);
+                            }
+                        },
+                    ))
+                },
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .text_xs()
+                    .text_color(rgb(MUTED_TEXT))
+                    .truncate()
+                    .child(self.source_browser_title()),
+            )
+    }
+
+    fn source_browser_title(&self) -> String {
+        match self.source_browser_view {
+            SourceBrowserView::SearchResults => "Search results".to_string(),
+            SourceBrowserView::Episodes => self
+                .selected_source_series_title
+                .as_ref()
+                .map(|title| format!("Episodes: {title}"))
+                .unwrap_or_else(|| "Episodes".to_string()),
+            SourceBrowserView::Streams => self
+                .selected_source_episode_title
+                .as_ref()
+                .map(|title| format!("Streams: {title}"))
+                .or_else(|| {
+                    self.selected_source_series_title
+                        .as_ref()
+                        .map(|title| format!("Streams: {title}"))
+                })
+                .unwrap_or_else(|| "Streams".to_string()),
+        }
+    }
+
+    fn render_source_browser_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        match self.source_browser_view {
+            SourceBrowserView::SearchResults => {
+                self.render_source_search_results(cx).into_any_element()
+            }
+            SourceBrowserView::Episodes => {
+                self.render_source_episode_results(cx).into_any_element()
+            }
+            SourceBrowserView::Streams => self.render_source_stream_results(cx).into_any_element(),
+        }
+    }
+
+    fn render_source_search_results(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("source-search-results")
+            .max_h(px(SOURCE_SEARCH_RESULT_MAX_HEIGHT))
+            .overflow_y_scroll()
+            .track_scroll(&self.source_search_scroll_handle)
+            .scrollbar_width(px(4.0))
+            .flex()
+            .flex_col()
+            .gap_1()
+            .when(
+                !self.is_source_search_pending && self.source_search_results.is_empty(),
+                |results| results.child(empty_menu_message("No source results yet.")),
+            )
+            .children(self.source_search_results.iter().cloned().enumerate().map(
+                |(index, search_result)| {
+                    self.render_source_search_result_row(
+                        search_result,
+                        index == self.selected_source_result_index,
+                        cx,
+                    )
+                },
+            ))
+    }
+
+    fn render_source_search_result_row(
+        &self,
+        search_result: SourceSearchResult,
+        is_selected: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let result_for_click = search_result.clone();
+        let result_id = source_search_result_key(&search_result);
+        let title = search_result.title.clone();
+        let provider_name = search_result.provider.name.clone();
+        let thumbnail_url = search_result.thumbnail_url.clone();
+        let has_thumbnail_url = thumbnail_url.is_some();
+        let kind_label = source_search_result_kind_label(&search_result);
+        let detail = search_result
+            .subtitle
+            .clone()
+            .unwrap_or_else(|| kind_label.to_string());
+
+        div()
+            .id(format!("source-search-result-{result_id}"))
+            .flex()
+            .items_center()
+            .gap_3()
+            .px_2()
+            .py_2()
+            .rounded_sm()
+            .border_1()
+            .border_color(if is_selected {
+                rgb(BRIGHT_BORDER)
+            } else {
+                rgb_alpha(SOFT_WHITE, 0.0)
+            })
+            .cursor_pointer()
+            .when(is_selected, |row| row.bg(rgb(0x161616)))
+            .hover(|row| row.bg(rgb(0x121212)))
+            .on_click(cx.listener(move |player, _, window, cx| {
+                player.load_source_search_result(result_for_click.clone(), window, cx);
+                cx.stop_propagation();
+            }))
+            .child(
+                div()
+                    .w(px(42.0))
+                    .h(px(42.0))
+                    .flex_none()
+                    .rounded_sm()
+                    .bg(rgb(0x101010))
+                    .border_1()
+                    .border_color(rgb(FINE_BORDER))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .overflow_hidden()
+                    .when_some(thumbnail_url, |thumbnail, thumbnail_url| {
+                        thumbnail.child(
+                            img(thumbnail_url)
+                                .w_full()
+                                .h_full()
+                                .object_fit(ObjectFit::Cover),
+                        )
+                    })
+                    .when(!has_thumbnail_url, |thumbnail| {
+                        thumbnail.child(
+                            svg()
+                                .external_path(crate::icon_path(ICON_GLOBE))
+                                .w(px(18.0))
+                                .h(px(18.0))
+                                .text_color(rgb(SOFT_WHITE)),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .flex_1()
+                    .min_w_0()
+                    .child(div().text_sm().truncate().child(title))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(MUTED_TEXT))
+                            .truncate()
+                            .child(detail),
+                    ),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(MUTED_TEXT))
+                    .child(format!("{provider_name} / {kind_label}")),
+            )
+    }
+
+    fn render_source_episode_results(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("source-episode-results")
+            .max_h(px(SOURCE_SEARCH_RESULT_MAX_HEIGHT))
+            .overflow_y_scroll()
+            .track_scroll(&self.source_episode_scroll_handle)
+            .scrollbar_width(px(4.0))
+            .flex()
+            .flex_col()
+            .gap_1()
+            .when(
+                !self.is_source_search_pending && self.source_episode_results.is_empty(),
+                |results| results.child(empty_menu_message("No episodes found.")),
+            )
+            .children(self.source_episode_results.iter().cloned().enumerate().map(
+                |episode_result| {
+                    let (index, episode_result) = episode_result;
+                    self.render_source_episode_result_row(
+                        episode_result,
+                        index == self.selected_source_result_index,
+                        cx,
+                    )
+                },
+            ))
+    }
+
+    fn render_source_episode_result_row(
+        &self,
+        episode_result: SourceEpisodeResult,
+        is_selected: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let episode_for_click = episode_result.clone();
+        let episode_id = source_episode_result_key(&episode_result);
+        let title = episode_result.title.clone();
+        let kind_label = source_episode_result_kind_label(&episode_result);
+        let detail = episode_result
+            .subtitle
+            .clone()
+            .unwrap_or_else(|| kind_label.to_string());
+
+        div()
+            .id(format!("source-episode-result-{episode_id}"))
+            .flex()
+            .items_center()
+            .gap_3()
+            .px_2()
+            .py_2()
+            .rounded_sm()
+            .border_1()
+            .border_color(if is_selected {
+                rgb(BRIGHT_BORDER)
+            } else {
+                rgb_alpha(SOFT_WHITE, 0.0)
+            })
+            .cursor_pointer()
+            .when(is_selected, |row| row.bg(rgb(0x161616)))
+            .hover(|row| row.bg(rgb(0x121212)))
+            .on_click(cx.listener(move |player, _, window, cx| {
+                player.load_source_episode_result(episode_for_click.clone(), window, cx);
+                cx.stop_propagation();
+            }))
+            .child(
+                div()
+                    .w(px(42.0))
+                    .h(px(42.0))
+                    .flex_none()
+                    .rounded_sm()
+                    .bg(rgb(0x101010))
+                    .border_1()
+                    .border_color(rgb(FINE_BORDER))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(rgb(SOFT_WHITE))
+                    .child("Ep"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .flex_1()
+                    .min_w_0()
+                    .child(div().text_sm().truncate().child(title))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(MUTED_TEXT))
+                            .truncate()
+                            .child(detail),
+                    ),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(MUTED_TEXT))
+                    .child(kind_label),
+            )
+    }
+
+    fn render_source_stream_results(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("source-stream-results")
+            .max_h(px(SOURCE_SEARCH_RESULT_MAX_HEIGHT))
+            .overflow_y_scroll()
+            .track_scroll(&self.source_stream_scroll_handle)
+            .scrollbar_width(px(4.0))
+            .flex()
+            .flex_col()
+            .gap_1()
+            .when(
+                !self.is_source_search_pending && self.source_stream_results.is_empty(),
+                |results| results.child(empty_menu_message("No playable streams found.")),
+            )
+            .children(self.source_stream_results.iter().cloned().enumerate().map(
+                |(index, stream_result)| {
+                    self.render_source_stream_result_row(
+                        stream_result,
+                        index == self.selected_source_result_index,
+                        cx,
+                    )
+                },
+            ))
+    }
+
+    fn render_source_stream_result_row(
+        &self,
+        stream_result: SourceStreamResult,
+        is_selected: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let stream_for_click = stream_result.clone();
+        let stream_id = internet_media_key(&stream_result.media);
+        let title = stream_result.media.title.clone();
+        let detail = stream_result
+            .media
+            .subtitle
+            .clone()
+            .unwrap_or_else(|| stream_result.media.stream_url.clone());
+        let quality = stream_result
+            .quality
+            .clone()
+            .unwrap_or_else(|| "Stream".to_string());
+
+        div()
+            .id(format!("source-stream-result-{stream_id}"))
+            .flex()
+            .items_center()
+            .gap_3()
+            .px_2()
+            .py_2()
+            .rounded_sm()
+            .border_1()
+            .border_color(if is_selected {
+                rgb(BRIGHT_BORDER)
+            } else {
+                rgb_alpha(SOFT_WHITE, 0.0)
+            })
+            .cursor_pointer()
+            .when(is_selected, |row| row.bg(rgb(0x161616)))
+            .hover(|row| row.bg(rgb(0x121212)))
+            .on_click(cx.listener(move |player, _, window, cx| {
+                player.load_source_stream_result(stream_for_click.clone(), window, cx);
+                cx.stop_propagation();
+            }))
+            .child(
+                div()
+                    .w(px(42.0))
+                    .h(px(42.0))
+                    .flex_none()
+                    .rounded_sm()
+                    .bg(rgb(0x101010))
+                    .border_1()
+                    .border_color(rgb(FINE_BORDER))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        svg()
+                            .external_path(crate::icon_path(ICON_PLAY))
+                            .w(px(18.0))
+                            .h(px(18.0))
+                            .text_color(rgb(SOFT_WHITE)),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .flex_1()
+                    .min_w_0()
+                    .child(div().text_sm().truncate().child(title))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(MUTED_TEXT))
+                            .truncate()
+                            .child(detail),
+                    ),
+            )
+            .child(div().text_xs().text_color(rgb(MUTED_TEXT)).child(quality))
+    }
+
     fn render_continue_watching_prompt(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let media_title = self
             .pending_watch_session
@@ -6343,6 +8072,117 @@ impl WatchPlayer {
                 cx,
                 |player, _window, cx| {
                     player.open_settings_selector(SettingsSelectorKind::BackdropBlur, cx);
+                },
+            ))
+            .child(self.render_source_provider_settings_section(cx))
+    }
+
+    fn render_source_provider_settings_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let provider_count = self.settings.source_providers.len();
+
+        div()
+            .id("settings-source-providers")
+            .flex()
+            .flex_col()
+            .gap_2()
+            .pt_2()
+            .border_t_1()
+            .border_color(rgb(FINE_BORDER))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .child(div().text_sm().flex_1().child("Source Providers"))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(MUTED_TEXT))
+                            .child(format!("{provider_count} saved")),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .child(div().flex_1().child(self.source_provider_input.clone()))
+                    .child(prompt_action_button(
+                        "settings-source-provider-add",
+                        "Add",
+                        false,
+                        1.0,
+                        cx,
+                        |player, window, cx| {
+                            player.add_source_provider_from_input(window, cx);
+                        },
+                    )),
+            )
+            .child(
+                div()
+                    .id("settings-source-provider-list")
+                    .max_h(px(SOURCE_PROVIDER_SETTINGS_MAX_HEIGHT))
+                    .overflow_y_scroll()
+                    .scrollbar_width(px(4.0))
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .when(self.settings.source_providers.is_empty(), |list| {
+                        list.child(empty_menu_message("No source providers saved."))
+                    })
+                    .children(
+                        self.settings
+                            .source_providers
+                            .iter()
+                            .cloned()
+                            .map(|provider| self.render_source_provider_settings_row(provider, cx)),
+                    ),
+            )
+    }
+
+    fn render_source_provider_settings_row(
+        &self,
+        provider: SourceProvider,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let provider_id = provider.id.clone();
+        let row_id = library_safe_element_key(&provider.id);
+
+        div()
+            .id(format!("settings-source-provider-{row_id}"))
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .hover(|row| row.bg(rgb(0x121212)))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_0()
+                    .flex_1()
+                    .min_w_0()
+                    .child(div().text_sm().truncate().child(provider.name))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(MUTED_TEXT))
+                            .truncate()
+                            .child(provider.search_url_template),
+                    ),
+            )
+            .child(queue_row_icon_button(
+                format!("settings-source-provider-remove-{row_id}"),
+                ICON_X,
+                "Remove source provider",
+                true,
+                cx,
+                move |player, _window, cx| {
+                    player.remove_source_provider(provider_id.clone(), cx);
                 },
             ))
     }
@@ -6897,6 +8737,619 @@ impl Render for TooltipText {
     }
 }
 
+const SOURCE_TEXT_INPUT_KEY_CONTEXT: &str = "SourceTextInput";
+
+struct InlineTextInput {
+    focus_handle: FocusHandle,
+    content: String,
+    placeholder: SharedString,
+    selected_range: Range<usize>,
+    selection_reversed: bool,
+    marked_range: Option<Range<usize>>,
+    last_layout: Option<ShapedLine>,
+    last_bounds: Option<Bounds<Pixels>>,
+    is_selecting: bool,
+}
+
+impl InlineTextInput {
+    fn new(placeholder: impl Into<SharedString>, cx: &mut Context<Self>) -> Self {
+        Self {
+            focus_handle: cx.focus_handle(),
+            content: String::new(),
+            placeholder: placeholder.into(),
+            selected_range: 0..0,
+            selection_reversed: false,
+            marked_range: None,
+            last_layout: None,
+            last_bounds: None,
+            is_selecting: false,
+        }
+    }
+
+    fn text(&self) -> String {
+        self.content.clone()
+    }
+
+    fn clear(&mut self, cx: &mut Context<Self>) {
+        self.content.clear();
+        self.selected_range = 0..0;
+        self.selection_reversed = false;
+        self.marked_range = None;
+        cx.notify();
+    }
+
+    fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            self.move_to(self.previous_boundary(self.cursor_offset()), cx);
+        } else {
+            self.move_to(self.selected_range.start, cx);
+        }
+    }
+
+    fn right(&mut self, _: &Right, _: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            self.move_to(self.next_boundary(self.selected_range.end), cx);
+        } else {
+            self.move_to(self.selected_range.end, cx);
+        }
+    }
+
+    fn select_left(&mut self, _: &SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.previous_boundary(self.cursor_offset()), cx);
+    }
+
+    fn select_right(&mut self, _: &SelectRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.next_boundary(self.cursor_offset()), cx);
+    }
+
+    fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(0, cx);
+        self.select_to(self.content.len(), cx);
+    }
+
+    fn home(&mut self, _: &Home, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(0, cx);
+    }
+
+    fn end(&mut self, _: &End, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(self.content.len(), cx);
+    }
+
+    fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            let previous_boundary = self.previous_boundary(self.cursor_offset());
+            if previous_boundary == self.cursor_offset() {
+                window.play_system_bell();
+                return;
+            }
+            self.select_to(previous_boundary, cx);
+        }
+        self.replace_text_in_range(None, "", window, cx);
+    }
+
+    fn delete(&mut self, _: &Delete, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            let next_boundary = self.next_boundary(self.cursor_offset());
+            if next_boundary == self.cursor_offset() {
+                window.play_system_bell();
+                return;
+            }
+            self.select_to(next_boundary, cx);
+        }
+        self.replace_text_in_range(None, "", window, cx);
+    }
+
+    fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+            let single_line_text = text.replace('\r', " ").replace('\n', " ");
+            self.replace_text_in_range(None, &single_line_text, window, cx);
+        }
+    }
+
+    fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.selected_range.is_empty() {
+            cx.write_to_clipboard(ClipboardItem::new_string(
+                self.content[self.selected_range.clone()].to_string(),
+            ));
+        }
+    }
+
+    fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.selected_range.is_empty() {
+            cx.write_to_clipboard(ClipboardItem::new_string(
+                self.content[self.selected_range.clone()].to_string(),
+            ));
+            self.replace_text_in_range(None, "", window, cx);
+        }
+    }
+
+    fn on_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.is_selecting = true;
+        if event.modifiers.shift {
+            self.select_to(self.index_for_mouse_position(event.position), cx);
+        } else {
+            self.move_to(self.index_for_mouse_position(event.position), cx);
+        }
+    }
+
+    fn on_mouse_up(&mut self, _: &MouseUpEvent, _window: &mut Window, _: &mut Context<Self>) {
+        self.is_selecting = false;
+    }
+
+    fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.is_selecting {
+            self.select_to(self.index_for_mouse_position(event.position), cx);
+        }
+    }
+
+    fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        let offset = self.clamp_to_char_boundary(offset);
+        self.selected_range = offset..offset;
+        self.selection_reversed = false;
+        cx.notify();
+    }
+
+    fn cursor_offset(&self) -> usize {
+        if self.selection_reversed {
+            self.selected_range.start
+        } else {
+            self.selected_range.end
+        }
+    }
+
+    fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        let offset = self.clamp_to_char_boundary(offset);
+        if self.selection_reversed {
+            self.selected_range.start = offset;
+        } else {
+            self.selected_range.end = offset;
+        }
+        if self.selected_range.end < self.selected_range.start {
+            self.selection_reversed = !self.selection_reversed;
+            self.selected_range = self.selected_range.end..self.selected_range.start;
+        }
+        cx.notify();
+    }
+
+    fn index_for_mouse_position(&self, position: Point<Pixels>) -> usize {
+        let (Some(bounds), Some(line)) = (self.last_bounds.as_ref(), self.last_layout.as_ref())
+        else {
+            return self.content.len();
+        };
+        if position.y < bounds.top() {
+            return 0;
+        }
+        if position.y > bounds.bottom() {
+            return self.content.len();
+        }
+        self.clamp_to_char_boundary(line.closest_index_for_x(position.x - bounds.left()))
+    }
+
+    fn previous_boundary(&self, offset: usize) -> usize {
+        let clamped_offset = offset.min(self.content.len());
+        self.content[..clamped_offset]
+            .char_indices()
+            .last()
+            .map(|(index, _)| index)
+            .unwrap_or(0)
+    }
+
+    fn next_boundary(&self, offset: usize) -> usize {
+        let clamped_offset = offset.min(self.content.len());
+        self.content[clamped_offset..]
+            .char_indices()
+            .nth(1)
+            .map(|(index, _)| clamped_offset + index)
+            .unwrap_or(self.content.len())
+    }
+
+    fn clamp_to_char_boundary(&self, offset: usize) -> usize {
+        let mut clamped_offset = offset.min(self.content.len());
+        while clamped_offset > 0 && !self.content.is_char_boundary(clamped_offset) {
+            clamped_offset -= 1;
+        }
+        clamped_offset
+    }
+
+    fn offset_from_utf16(&self, offset: usize) -> usize {
+        let mut utf8_offset = 0;
+        let mut utf16_count = 0;
+
+        for character in self.content.chars() {
+            if utf16_count >= offset {
+                break;
+            }
+            utf16_count += character.len_utf16();
+            utf8_offset += character.len_utf8();
+        }
+
+        utf8_offset
+    }
+
+    fn offset_to_utf16(&self, offset: usize) -> usize {
+        self.content[..self.clamp_to_char_boundary(offset)]
+            .chars()
+            .map(char::len_utf16)
+            .sum()
+    }
+
+    fn range_from_utf16(&self, range: &Range<usize>) -> Range<usize> {
+        self.offset_from_utf16(range.start)..self.offset_from_utf16(range.end)
+    }
+
+    fn range_to_utf16(&self, range: &Range<usize>) -> Range<usize> {
+        self.offset_to_utf16(range.start)..self.offset_to_utf16(range.end)
+    }
+}
+
+impl EntityInputHandler for InlineTextInput {
+    fn text_for_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        actual_range: &mut Option<Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<String> {
+        let range = self.range_from_utf16(&range_utf16);
+        actual_range.replace(self.range_to_utf16(&range));
+        Some(self.content[range].to_string())
+    }
+
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled_input: bool,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        Some(UTF16Selection {
+            range: self.range_to_utf16(&self.selected_range),
+            reversed: self.selection_reversed,
+        })
+    }
+
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Range<usize>> {
+        self.marked_range
+            .as_ref()
+            .map(|range| self.range_to_utf16(range))
+    }
+
+    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
+        self.marked_range = None;
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        new_text: &str,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let range = range_utf16
+            .as_ref()
+            .map(|range| self.range_from_utf16(range))
+            .or(self.marked_range.clone())
+            .unwrap_or(self.selected_range.clone());
+        let single_line_text = new_text.replace('\r', " ").replace('\n', " ");
+
+        self.content = format!(
+            "{}{}{}",
+            &self.content[..range.start],
+            single_line_text,
+            &self.content[range.end..]
+        );
+        let cursor_offset = range.start + single_line_text.len();
+        self.selected_range = cursor_offset..cursor_offset;
+        self.selection_reversed = false;
+        self.marked_range = None;
+        cx.notify();
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        new_text: &str,
+        new_selected_range_utf16: Option<Range<usize>>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let range = range_utf16
+            .as_ref()
+            .map(|range| self.range_from_utf16(range))
+            .or(self.marked_range.clone())
+            .unwrap_or(self.selected_range.clone());
+        let single_line_text = new_text.replace('\r', " ").replace('\n', " ");
+
+        self.content = format!(
+            "{}{}{}",
+            &self.content[..range.start],
+            single_line_text,
+            &self.content[range.end..]
+        );
+        self.marked_range = (!single_line_text.is_empty())
+            .then_some(range.start..range.start + single_line_text.len());
+        self.selected_range = new_selected_range_utf16
+            .as_ref()
+            .map(|range| self.range_from_utf16(range))
+            .map(|selected_range| {
+                range.start + selected_range.start..range.start + selected_range.end
+            })
+            .unwrap_or_else(|| {
+                range.start + single_line_text.len()..range.start + single_line_text.len()
+            });
+        self.selection_reversed = false;
+        cx.notify();
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        bounds: Bounds<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        let last_layout = self.last_layout.as_ref()?;
+        let range = self.range_from_utf16(&range_utf16);
+
+        Some(Bounds::from_corners(
+            point(
+                bounds.left() + last_layout.x_for_index(range.start),
+                bounds.top(),
+            ),
+            point(
+                bounds.left() + last_layout.x_for_index(range.end),
+                bounds.bottom(),
+            ),
+        ))
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        point: Point<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        let line_point = self.last_bounds?.localize(&point)?;
+        let last_layout = self.last_layout.as_ref()?;
+        let utf8_index = last_layout.index_for_x(point.x - line_point.x)?;
+
+        Some(self.offset_to_utf16(utf8_index))
+    }
+}
+
+struct InlineTextElement {
+    input: Entity<InlineTextInput>,
+}
+
+struct InlineTextPrepaintState {
+    line: Option<ShapedLine>,
+    cursor: Option<PaintQuad>,
+    selection: Option<PaintQuad>,
+}
+
+impl IntoElement for InlineTextElement {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for InlineTextElement {
+    type RequestLayoutState = ();
+    type PrepaintState = InlineTextPrepaintState;
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let mut style = Style::default();
+        style.size.width = relative(1.0).into();
+        style.size.height = window.line_height().into();
+
+        (window.request_layout(style, [], cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        let input = self.input.read(cx);
+        let content = input.content.clone();
+        let selected_range = input.selected_range.clone();
+        let cursor_offset = input.cursor_offset();
+        let style = window.text_style();
+        let (display_text, text_color) = if content.is_empty() {
+            (input.placeholder.clone(), rgb(MUTED_TEXT).into())
+        } else {
+            (SharedString::from(content), style.color)
+        };
+        let base_run = TextRun {
+            len: display_text.len(),
+            font: style.font(),
+            color: text_color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let runs = if let Some(marked_range) = input.marked_range.as_ref() {
+            vec![
+                TextRun {
+                    len: marked_range.start,
+                    ..base_run.clone()
+                },
+                TextRun {
+                    len: marked_range.end - marked_range.start,
+                    underline: Some(UnderlineStyle {
+                        color: Some(base_run.color),
+                        thickness: px(1.0),
+                        wavy: false,
+                    }),
+                    ..base_run.clone()
+                },
+                TextRun {
+                    len: display_text.len() - marked_range.end,
+                    ..base_run
+                },
+            ]
+            .into_iter()
+            .filter(|run| run.len > 0)
+            .collect::<Vec<_>>()
+        } else {
+            vec![base_run]
+        };
+        let font_size = style.font_size.to_pixels(window.rem_size());
+        let line = window
+            .text_system()
+            .shape_line(display_text, font_size, &runs, None);
+        let cursor_position = line.x_for_index(cursor_offset);
+        let (selection, cursor) = if selected_range.is_empty() {
+            (
+                None,
+                Some(fill(
+                    Bounds::new(
+                        point(bounds.left() + cursor_position, bounds.top()),
+                        size(px(1.5), bounds.bottom() - bounds.top()),
+                    ),
+                    rgb(SOFT_WHITE),
+                )),
+            )
+        } else {
+            (
+                Some(fill(
+                    Bounds::from_corners(
+                        point(
+                            bounds.left() + line.x_for_index(selected_range.start),
+                            bounds.top(),
+                        ),
+                        point(
+                            bounds.left() + line.x_for_index(selected_range.end),
+                            bounds.bottom(),
+                        ),
+                    ),
+                    rgba(0xffffff28),
+                )),
+                None,
+            )
+        };
+
+        InlineTextPrepaintState {
+            line: Some(line),
+            cursor,
+            selection,
+        }
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let focus_handle = self.input.read(cx).focus_handle.clone();
+        window.handle_input(
+            &focus_handle,
+            ElementInputHandler::new(bounds, self.input.clone()),
+            cx,
+        );
+        if let Some(selection) = prepaint.selection.take() {
+            window.paint_quad(selection);
+        }
+        let line = prepaint.line.take().unwrap();
+        line.paint(
+            bounds.origin,
+            window.line_height(),
+            gpui::TextAlign::Left,
+            None,
+            window,
+            cx,
+        )
+        .unwrap();
+
+        if focus_handle.is_focused(window) {
+            if let Some(cursor) = prepaint.cursor.take() {
+                window.paint_quad(cursor);
+            }
+        }
+
+        self.input.update(cx, |input, _cx| {
+            input.last_layout = Some(line);
+            input.last_bounds = Some(bounds);
+        });
+    }
+}
+
+impl Render for InlineTextInput {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .key_context(SOURCE_TEXT_INPUT_KEY_CONTEXT)
+            .track_focus(&self.focus_handle(cx))
+            .cursor(CursorStyle::IBeam)
+            .on_action(cx.listener(Self::backspace))
+            .on_action(cx.listener(Self::delete))
+            .on_action(cx.listener(Self::left))
+            .on_action(cx.listener(Self::right))
+            .on_action(cx.listener(Self::select_left))
+            .on_action(cx.listener(Self::select_right))
+            .on_action(cx.listener(Self::select_all))
+            .on_action(cx.listener(Self::home))
+            .on_action(cx.listener(Self::end))
+            .on_action(cx.listener(Self::paste))
+            .on_action(cx.listener(Self::cut))
+            .on_action(cx.listener(Self::copy))
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
+            .on_mouse_move(cx.listener(Self::on_mouse_move))
+            .w_full()
+            .h(px(34.0))
+            .px_3()
+            .py_1()
+            .bg(rgb(0x101010))
+            .border_1()
+            .border_color(rgb(FINE_BORDER))
+            .rounded_sm()
+            .text_size(px(14.0))
+            .line_height(px(20.0))
+            .text_color(rgb(SOFT_WHITE))
+            .child(InlineTextElement { input: cx.entity() })
+    }
+}
+
+impl Focusable for InlineTextInput {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
 impl Render for WatchPlayer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.save_current_window_bounds_if_due(window);
@@ -6907,10 +9360,15 @@ impl Render for WatchPlayer {
         let is_video_surface_active = self.is_video_surface_active();
         let should_show_blurred_library_backdrop =
             self.settings.is_backdrop_blur_enabled && self.is_library_surface_visible();
+        let active_key_context = if self.is_source_search_open || self.is_settings_modal_open {
+            WATCH_DIALOG_KEY_CONTEXT
+        } else {
+            WATCH_PLAYER_KEY_CONTEXT
+        };
 
         div()
             .id("watch-player")
-            .key_context(WATCH_PLAYER_KEY_CONTEXT)
+            .key_context(active_key_context)
             .on_action(cx.listener(Self::toggle_playback))
             .on_action(cx.listener(Self::toggle_mute_action))
             .on_action(cx.listener(Self::toggle_fullscreen))
@@ -6944,6 +9402,9 @@ impl Render for WatchPlayer {
             .on_action(cx.listener(Self::decrease_playback_speed))
             .on_action(cx.listener(Self::toggle_shuffle))
             .on_action(cx.listener(Self::cycle_repeat_mode))
+            .on_action(cx.listener(Self::submit_source_search_or_selection))
+            .on_action(cx.listener(Self::select_previous_source_result))
+            .on_action(cx.listener(Self::select_next_source_result))
             .track_focus(&self.focus_handle)
             .size_full()
             .bg(
@@ -6990,6 +9451,7 @@ impl Render for WatchPlayer {
                 if player.is_library_open
                     || player.is_main_menu_open
                     || player.is_subtitle_menu_open
+                    || player.is_source_search_open
                     || player.open_context_menu_section.is_some()
                 {
                     return;
@@ -7267,10 +9729,13 @@ fn simple_menu_action(
         .rounded_sm()
         .cursor_pointer()
         .hover(|menu_item| menu_item.bg(rgb(0x121212)))
-        .on_click(cx.listener(move |player, _, window, cx| {
-            on_click(player, window, cx);
-            cx.stop_propagation();
-        }))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |player, _event, window, cx| {
+                on_click(player, window, cx);
+                cx.stop_propagation();
+            }),
+        )
         .child(label)
 }
 
@@ -7499,6 +9964,83 @@ fn prompt_action_button(
             on_click(player, window, cx);
         }))
         .child(label)
+}
+
+fn source_back_button(
+    id: &'static str,
+    label: &'static str,
+    cx: &mut Context<WatchPlayer>,
+    on_click: impl Fn(&mut WatchPlayer, &mut Window, &mut Context<WatchPlayer>) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .px(px(12.0))
+        .py(px(7.0))
+        .text_size(px(13.0))
+        .line_height(px(18.0))
+        .text_color(rgb(SOFT_WHITE))
+        .bg(rgb(0x151515))
+        .border_1()
+        .border_color(rgb(FINE_BORDER))
+        .rounded_sm()
+        .cursor_pointer()
+        .flex()
+        .items_center()
+        .gap_1()
+        .hover(|button| button.opacity(0.82))
+        .active(|button| button.opacity(0.72))
+        .on_click(cx.listener(move |player, _, window, cx| {
+            on_click(player, window, cx);
+        }))
+        .child(
+            svg()
+                .external_path(crate::icon_path(ICON_CHEVRON_LEFT))
+                .w(px(14.0))
+                .h(px(14.0))
+                .text_color(rgb(SOFT_WHITE)),
+        )
+        .child(label)
+}
+
+fn prompt_icon_action_button(
+    id: &'static str,
+    icon_path: &'static str,
+    tooltip: &'static str,
+    button_scale: f32,
+    cx: &mut Context<WatchPlayer>,
+    on_click: impl Fn(&mut WatchPlayer, &mut Window, &mut Context<WatchPlayer>) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .w(px(38.0 * button_scale))
+        .h(px(38.0 * button_scale))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_color(rgb(SOFT_WHITE))
+        .bg(rgb(0x151515))
+        .border_1()
+        .border_color(rgb(FINE_BORDER))
+        .rounded_sm()
+        .cursor_pointer()
+        .hover(|button| button.opacity(0.82))
+        .active(|button| button.opacity(0.72))
+        .on_click(cx.listener(move |player, _, window, cx| {
+            on_click(player, window, cx);
+        }))
+        .child(
+            svg()
+                .external_path(crate::icon_path(icon_path))
+                .w(px(18.0 * button_scale))
+                .h(px(18.0 * button_scale))
+                .text_color(rgb(SOFT_WHITE)),
+        )
+        .tooltip(move |_window, cx| {
+            cx.new(|_| TooltipText {
+                text: tooltip.into(),
+            })
+            .into()
+        })
 }
 
 fn square_button(
@@ -8565,6 +11107,16 @@ fn build_live_capture_media(device: LiveCaptureDevice) -> LoadedMedia {
     }
 }
 
+fn build_internet_media(media: InternetMedia) -> LoadedMedia {
+    LoadedMedia {
+        source: LoadedMediaSource::Internet(media),
+        duration_seconds: None,
+        audio_tracks: Vec::new(),
+        subtitle_paths: Vec::new(),
+        embedded_subtitle_tracks: Vec::new(),
+    }
+}
+
 fn list_live_capture_devices(ffmpeg_path: &Path) -> Result<LiveCaptureDeviceScan, String> {
     #[cfg(target_os = "windows")]
     {
@@ -8942,6 +11494,21 @@ fn load_player_library() -> PlayerLibrary {
             .flatten()
             .filter_map(media_history_entry_from_json)
             .collect(),
+        recent_internet_media: library_value
+            .get("recent_internet_media")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(internet_media_from_json)
+            .take(MAX_RECENT_MEDIA)
+            .collect(),
+        internet_media_history: library_value
+            .get("internet_media_history")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(internet_media_history_entry_from_json)
+            .collect(),
     }
 }
 
@@ -8985,6 +11552,24 @@ fn save_player_library_atomic(library: &PlayerLibrary) {
                     "selected_subtitle_path": entry.selected_subtitle_path
                         .as_ref()
                         .map(|path| path.display().to_string()),
+                })
+            })
+            .collect::<Vec<_>>(),
+        "recent_internet_media": library
+            .recent_internet_media
+            .iter()
+            .map(internet_media_to_json)
+            .collect::<Vec<_>>(),
+        "internet_media_history": library
+            .internet_media_history
+            .iter()
+            .map(|entry| {
+                json!({
+                    "media": internet_media_to_json(&entry.media),
+                    "playback_position_seconds": entry.playback_position_seconds,
+                    "duration_seconds": entry.duration_seconds,
+                    "is_completed": entry.is_completed,
+                    "updated_at_millis": entry.updated_at_millis,
                 })
             })
             .collect::<Vec<_>>(),
@@ -9059,6 +11644,176 @@ fn media_history_entry_from_json(history_value: &Value) -> Option<MediaHistoryEn
     })
 }
 
+fn internet_media_from_json(media_value: &Value) -> Option<InternetMedia> {
+    let provider_id = media_value
+        .get("provider_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let provider_name = media_value
+        .get("provider_name")
+        .and_then(Value::as_str)
+        .unwrap_or("Source")
+        .trim()
+        .to_string();
+    let title = media_value
+        .get("title")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|title| !title.is_empty())?
+        .to_string();
+    let stream_url = media_value
+        .get("stream_url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|url| is_http_url(url))?
+        .to_string();
+
+    Some(InternetMedia {
+        provider_id,
+        provider_name,
+        title,
+        series_title: media_value
+            .get("series_title")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map(ToString::to_string),
+        episode_title: media_value
+            .get("episode_title")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map(ToString::to_string),
+        episode_number: media_value
+            .get("episode_number")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|number| !number.is_empty())
+            .map(ToString::to_string),
+        subtitle: media_value
+            .get("subtitle")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|subtitle| !subtitle.is_empty())
+            .map(ToString::to_string),
+        stream_url,
+        thumbnail_url: media_value
+            .get("thumbnail_url")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|url| is_http_url(url))
+            .map(ToString::to_string),
+        http_headers: media_value
+            .get("http_headers")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(internet_media_http_header_from_json)
+            .collect(),
+    })
+}
+
+fn internet_media_http_header_from_json(header_value: &Value) -> Option<InternetMediaHttpHeader> {
+    let name = header_value
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())?
+        .to_string();
+    let value = header_value
+        .get("value")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?
+        .to_string();
+
+    Some(InternetMediaHttpHeader { name, value })
+}
+
+fn internet_media_history_entry_from_json(
+    history_value: &Value,
+) -> Option<InternetMediaHistoryEntry> {
+    let media = history_value
+        .get("media")
+        .and_then(internet_media_from_json)?;
+
+    Some(InternetMediaHistoryEntry {
+        media,
+        playback_position_seconds: history_value
+            .get("playback_position_seconds")
+            .and_then(Value::as_f64)
+            .filter(|position_seconds| position_seconds.is_finite())
+            .unwrap_or(0.0)
+            .max(0.0),
+        duration_seconds: history_value
+            .get("duration_seconds")
+            .and_then(Value::as_f64)
+            .filter(|duration_seconds| duration_seconds.is_finite() && *duration_seconds > 0.0),
+        is_completed: history_value
+            .get("is_completed")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        updated_at_millis: history_value
+            .get("updated_at_millis")
+            .and_then(Value::as_u64)
+            .map(u128::from)
+            .unwrap_or_default(),
+    })
+}
+
+fn internet_media_to_json(media: &InternetMedia) -> Value {
+    json!({
+        "provider_id": media.provider_id.clone(),
+        "provider_name": media.provider_name.clone(),
+        "title": media.title.clone(),
+        "series_title": media.series_title.clone(),
+        "episode_title": media.episode_title.clone(),
+        "episode_number": media.episode_number.clone(),
+        "subtitle": media.subtitle.clone(),
+        "stream_url": media.stream_url.clone(),
+        "thumbnail_url": media.thumbnail_url.clone(),
+        "http_headers": media
+            .http_headers
+            .iter()
+            .map(|header| {
+                json!({
+                    "name": header.name.clone(),
+                    "value": header.value.clone(),
+                })
+            })
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn apply_source_media_metadata(
+    media: &mut InternetMedia,
+    series_title: &str,
+    episode_title: Option<&str>,
+    thumbnail_url: Option<String>,
+) {
+    if media.series_title.is_none() && !series_title.trim().is_empty() {
+        media.series_title = Some(series_title.trim().to_string());
+    }
+    if media.episode_title.is_none() {
+        media.episode_title = episode_title
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map(ToString::to_string);
+    }
+    if media.episode_number.is_none() {
+        media.episode_number = media
+            .episode_title
+            .as_deref()
+            .and_then(source_episode_number_from_text)
+            .or_else(|| source_episode_number_from_text(&media.title));
+    }
+    if media.thumbnail_url.is_none() {
+        media.thumbnail_url = thumbnail_url;
+    }
+}
+
 fn current_time_millis() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -9071,6 +11826,28 @@ fn promote_recent_path(recent_paths: &mut Vec<PathBuf>, path: PathBuf, max_len: 
     recent_paths.retain(|recent_path| library_media_path_key(recent_path) != promoted_path_key);
     recent_paths.insert(0, path);
     recent_paths.truncate(max_len);
+}
+
+fn promote_recent_internet_media(
+    recent_media: &mut Vec<InternetMedia>,
+    media: InternetMedia,
+    max_len: usize,
+) {
+    let promoted_media_key = internet_media_key(&media);
+    recent_media.retain(|recent_media| internet_media_key(recent_media) != promoted_media_key);
+    recent_media.insert(0, media);
+    recent_media.truncate(max_len);
+}
+
+fn internet_media_key(media: &InternetMedia) -> String {
+    format!(
+        "{:016x}",
+        stable_hash_bytes(format!("{}|{}", media.provider_id, media.stream_url).as_bytes())
+    )
+}
+
+fn internet_media_library_path(media: &InternetMedia) -> PathBuf {
+    PathBuf::from(format!("internet-{}", internet_media_key(media)))
 }
 
 fn library_media_path_key(path: &Path) -> String {
@@ -9089,6 +11866,848 @@ fn default_audio_output_options() -> Vec<AudioOutputDeviceOption> {
         label: "Auto".to_string(),
         device_id: AUDIO_OUTPUT_AUTO_DEVICE_ID.to_string(),
     }]
+}
+
+fn built_in_allanime_provider() -> SourceProvider {
+    SourceProvider {
+        id: ALLANIME_PROVIDER_ID.to_string(),
+        name: ALLANIME_PROVIDER_NAME.to_string(),
+        search_url_template: format!("{ALLANIME_SOURCE_URL_PREFIX}search"),
+        episodes_url_template: None,
+        streams_url_template: None,
+    }
+}
+
+fn available_source_providers(custom_source_providers: &[SourceProvider]) -> Vec<SourceProvider> {
+    let mut source_providers = Vec::with_capacity(custom_source_providers.len() + 1);
+    source_providers.push(built_in_allanime_provider());
+    source_providers.extend(custom_source_providers.iter().cloned());
+    source_providers
+}
+
+fn available_source_provider_count(settings: &PlayerSettings) -> usize {
+    available_source_providers(&settings.source_providers).len()
+}
+
+fn is_allanime_provider(provider: &SourceProvider) -> bool {
+    provider.id == ALLANIME_PROVIDER_ID
+}
+
+fn allanime_episodes_source_url(show_id: &str) -> String {
+    format!("{ALLANIME_SOURCE_URL_PREFIX}episodes/{show_id}")
+}
+
+fn allanime_streams_source_url(show_id: &str, episode_number: &str) -> String {
+    format!("{ALLANIME_SOURCE_URL_PREFIX}streams/{show_id}/{episode_number}")
+}
+
+fn allanime_show_id_from_episodes_url(episodes_url: &str) -> Option<String> {
+    episodes_url
+        .strip_prefix(&format!("{ALLANIME_SOURCE_URL_PREFIX}episodes/"))
+        .map(str::trim)
+        .filter(|show_id| !show_id.is_empty())
+        .map(ToString::to_string)
+}
+
+fn allanime_stream_parts_from_streams_url(streams_url: &str) -> Option<(String, String)> {
+    let remaining_url =
+        streams_url.strip_prefix(&format!("{ALLANIME_SOURCE_URL_PREFIX}streams/"))?;
+    let (show_id, episode_number) = remaining_url.split_once('/')?;
+    let show_id = show_id.trim();
+    let episode_number = episode_number.trim();
+
+    if show_id.is_empty() || episode_number.is_empty() {
+        None
+    } else {
+        Some((show_id.to_string(), episode_number.to_string()))
+    }
+}
+
+fn source_provider_from_input(input: &str) -> Option<SourceProvider> {
+    let trimmed_input = input.trim();
+    if trimmed_input.is_empty() {
+        return None;
+    }
+
+    let provider_parts = trimmed_input.split('|').map(str::trim).collect::<Vec<_>>();
+    if provider_parts.len() > 4 {
+        return None;
+    }
+
+    let (name_hint, raw_search_url_template) = if provider_parts.len() == 1 {
+        ("", provider_parts[0])
+    } else {
+        (provider_parts[0], provider_parts[1])
+    };
+    if !is_http_url(raw_search_url_template) {
+        return None;
+    }
+
+    let episodes_url_template = provider_parts
+        .get(2)
+        .map(|template| template.trim())
+        .filter(|template| !template.is_empty())
+        .map(ToString::to_string);
+    if episodes_url_template
+        .as_deref()
+        .is_some_and(|template| !is_http_url(template))
+    {
+        return None;
+    }
+
+    let streams_url_template = provider_parts
+        .get(3)
+        .map(|template| template.trim())
+        .filter(|template| !template.is_empty())
+        .map(ToString::to_string);
+    if streams_url_template
+        .as_deref()
+        .is_some_and(|template| !is_http_url(template))
+    {
+        return None;
+    }
+
+    let search_url_template = normalize_source_provider_template(raw_search_url_template);
+    let name = if name_hint.is_empty() {
+        source_provider_name_from_url(&search_url_template)
+    } else {
+        collapse_whitespace(name_hint)
+    };
+    let id = format!(
+        "{:016x}",
+        stable_hash_bytes(
+            format!(
+                "{name}|{search_url_template}|{}|{}",
+                episodes_url_template.as_deref().unwrap_or_default(),
+                streams_url_template.as_deref().unwrap_or_default()
+            )
+            .as_bytes()
+        )
+    );
+
+    Some(SourceProvider {
+        id,
+        name,
+        search_url_template,
+        episodes_url_template,
+        streams_url_template,
+    })
+}
+
+fn normalize_source_provider_template(raw_url_template: &str) -> String {
+    let trimmed_template = raw_url_template.trim().to_string();
+    if trimmed_template.contains("{query}") {
+        return trimmed_template;
+    }
+
+    if trimmed_template.contains('?') {
+        format!("{trimmed_template}&q={{query}}")
+    } else {
+        format!("{trimmed_template}?q={{query}}")
+    }
+}
+
+fn source_provider_name_from_url(url_template: &str) -> String {
+    let without_scheme = url_template
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    let host = without_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("Source")
+        .trim_start_matches("www.");
+
+    if host.is_empty() {
+        "Source".to_string()
+    } else {
+        host.to_string()
+    }
+}
+
+fn upsert_source_provider(source_providers: &mut Vec<SourceProvider>, provider: SourceProvider) {
+    source_providers.retain(|existing_provider| {
+        existing_provider.id != provider.id
+            && existing_provider.search_url_template != provider.search_url_template
+    });
+    source_providers.insert(0, provider);
+}
+
+fn search_configured_source_providers(
+    source_providers: Vec<SourceProvider>,
+    search_query: String,
+) -> Result<Vec<SourceSearchResult>, String> {
+    let mut search_results = Vec::new();
+    let mut error_messages = Vec::new();
+
+    for provider in source_providers {
+        match fetch_source_provider_results(&provider, &search_query) {
+            Ok(mut provider_results) => search_results.append(&mut provider_results),
+            Err(error_message) => error_messages.push(error_message),
+        }
+    }
+
+    search_results.truncate(MAX_LIBRARY_ITEMS_PER_SHELF);
+    if !search_results.is_empty() {
+        Ok(search_results)
+    } else if let Some(error_message) = error_messages.into_iter().next() {
+        Err(error_message)
+    } else {
+        Ok(Vec::new())
+    }
+}
+
+fn fetch_source_provider_results(
+    provider: &SourceProvider,
+    search_query: &str,
+) -> Result<Vec<SourceSearchResult>, String> {
+    if is_allanime_provider(provider) {
+        return fetch_allanime_source_provider_results(provider, search_query);
+    }
+
+    let search_url = provider_search_url(provider, search_query);
+    let response = ureq::get(&search_url)
+        .timeout(Duration::from_secs(15))
+        .call()
+        .map_err(|error| format!("{} search failed: {error}", provider.name))?;
+    let response_json = response
+        .into_json::<Value>()
+        .map_err(|error| format!("{} returned invalid JSON: {error}", provider.name))?;
+
+    Ok(parse_source_provider_results(provider, &response_json))
+}
+
+fn fetch_allanime_source_provider_results(
+    provider: &SourceProvider,
+    search_query: &str,
+) -> Result<Vec<SourceSearchResult>, String> {
+    Ok(allanime::search_anime(search_query)?
+        .into_iter()
+        .map(|anime_result| SourceSearchResult {
+            provider: provider.clone(),
+            item_id: Some(anime_result.show_id.clone()),
+            title: anime_result.title,
+            subtitle: anime_result.subtitle,
+            episodes_url: Some(allanime_episodes_source_url(&anime_result.show_id)),
+            streams_url: None,
+            direct_media: None,
+            thumbnail_url: anime_result.thumbnail_url,
+        })
+        .collect())
+}
+
+fn provider_search_url(provider: &SourceProvider, search_query: &str) -> String {
+    provider
+        .search_url_template
+        .replace("{query}", &percent_encode_query_component(search_query))
+}
+
+fn parse_source_provider_results(
+    provider: &SourceProvider,
+    response_json: &Value,
+) -> Vec<SourceSearchResult> {
+    source_result_values(
+        response_json,
+        &["results", "items", "series", "anime", "data"],
+    )
+    .into_iter()
+    .filter_map(|result_value| parse_source_provider_result(provider, result_value))
+    .collect()
+}
+
+fn parse_source_provider_result(
+    provider: &SourceProvider,
+    result_value: &Value,
+) -> Option<SourceSearchResult> {
+    let title = text_json_field(result_value, &["title", "name", "series", "label"])?;
+    let subtitle = string_json_field(
+        result_value,
+        &[
+            "subtitle",
+            "description",
+            "releaseDate",
+            "type",
+            "subOrDub",
+            "episode",
+            "season",
+            "year",
+        ],
+    );
+    let thumbnail_url = string_json_field(
+        result_value,
+        &[
+            "thumbnail_url",
+            "thumbnailUrl",
+            "thumbnail",
+            "poster",
+            "image",
+        ],
+    )
+    .filter(|url| is_http_url(url));
+    let stream_url = playable_stream_url(result_value, false);
+    let direct_media = stream_url.map(|stream_url| InternetMedia {
+        provider_id: provider.id.clone(),
+        provider_name: provider.name.clone(),
+        title: title.clone(),
+        series_title: Some(title.clone()),
+        episode_title: None,
+        episode_number: None,
+        subtitle: subtitle.clone(),
+        stream_url,
+        thumbnail_url: thumbnail_url.clone(),
+        http_headers: Vec::new(),
+    });
+
+    Some(SourceSearchResult {
+        provider: provider.clone(),
+        item_id: source_series_item_id(result_value),
+        title,
+        subtitle,
+        episodes_url: source_url_json_field(
+            result_value,
+            &[
+                "episodes_url",
+                "episodesUrl",
+                "episode_list_url",
+                "episodeListUrl",
+            ],
+        ),
+        streams_url: source_url_json_field(
+            result_value,
+            &["streams_url", "streamsUrl", "sources_url", "sourcesUrl"],
+        ),
+        direct_media,
+        thumbnail_url,
+    })
+}
+
+fn fetch_source_episode_results(
+    provider: &SourceProvider,
+    series_title: &str,
+    episodes_url: &str,
+) -> Result<Vec<SourceEpisodeResult>, String> {
+    if is_allanime_provider(provider) {
+        return fetch_allanime_source_episode_results(provider, series_title, episodes_url);
+    }
+
+    let response_json = fetch_source_json(provider, episodes_url, "episodes")?;
+    Ok(
+        source_result_values(&response_json, &["episodes", "results", "items", "data"])
+            .into_iter()
+            .filter_map(|episode_value| {
+                parse_source_episode_result(provider, series_title, episode_value)
+            })
+            .collect(),
+    )
+}
+
+fn fetch_allanime_source_episode_results(
+    provider: &SourceProvider,
+    series_title: &str,
+    episodes_url: &str,
+) -> Result<Vec<SourceEpisodeResult>, String> {
+    let show_id = allanime_show_id_from_episodes_url(episodes_url)
+        .ok_or_else(|| "AllAnime episode URL was invalid.".to_string())?;
+
+    Ok(allanime::fetch_episodes(&show_id)?
+        .into_iter()
+        .map(|episode_result| SourceEpisodeResult {
+            provider: provider.clone(),
+            series_title: series_title.to_string(),
+            item_id: Some(episode_result.episode_number.clone()),
+            title: episode_result.title,
+            subtitle: episode_result.subtitle,
+            streams_url: Some(allanime_streams_source_url(
+                &show_id,
+                &episode_result.episode_number,
+            )),
+            direct_media: None,
+        })
+        .collect())
+}
+
+fn parse_source_episode_result(
+    provider: &SourceProvider,
+    series_title: &str,
+    episode_value: &Value,
+) -> Option<SourceEpisodeResult> {
+    let title = text_json_field(
+        episode_value,
+        &["title", "name", "episodeTitle", "episode_title", "label"],
+    )
+    .or_else(|| {
+        text_json_field(
+            episode_value,
+            &["number", "episode", "episodeNumber", "episode_number"],
+        )
+        .map(|episode_number| format!("Episode {episode_number}"))
+    })?;
+    let subtitle = string_json_field(
+        episode_value,
+        &["subtitle", "description", "releaseDate", "type", "subOrDub"],
+    );
+    let episode_number = source_episode_item_id(episode_value);
+    let stream_url = playable_stream_url(episode_value, false);
+    let direct_media = stream_url.map(|stream_url| InternetMedia {
+        provider_id: provider.id.clone(),
+        provider_name: provider.name.clone(),
+        title: format!("{series_title} - {title}"),
+        series_title: Some(series_title.to_string()),
+        episode_title: Some(title.clone()),
+        episode_number: episode_number.clone(),
+        subtitle: subtitle.clone(),
+        stream_url,
+        thumbnail_url: None,
+        http_headers: Vec::new(),
+    });
+
+    Some(SourceEpisodeResult {
+        provider: provider.clone(),
+        series_title: series_title.to_string(),
+        item_id: episode_number,
+        title,
+        subtitle,
+        streams_url: source_url_json_field(
+            episode_value,
+            &["streams_url", "streamsUrl", "sources_url", "sourcesUrl"],
+        ),
+        direct_media,
+    })
+}
+
+fn fetch_source_stream_results(
+    provider: &SourceProvider,
+    series_title: &str,
+    episode_title: Option<&str>,
+    streams_url: &str,
+) -> Result<Vec<SourceStreamResult>, String> {
+    if is_allanime_provider(provider) {
+        return fetch_allanime_source_stream_results(
+            provider,
+            series_title,
+            episode_title,
+            streams_url,
+        );
+    }
+
+    let response_json = fetch_source_json(provider, streams_url, "streams")?;
+    Ok(source_result_values(
+        &response_json,
+        &["sources", "streams", "links", "results", "items", "data"],
+    )
+    .into_iter()
+    .filter_map(|stream_value| {
+        parse_source_stream_result(provider, series_title, episode_title, stream_value)
+    })
+    .collect())
+}
+
+fn fetch_allanime_source_stream_results(
+    provider: &SourceProvider,
+    series_title: &str,
+    episode_title: Option<&str>,
+    streams_url: &str,
+) -> Result<Vec<SourceStreamResult>, String> {
+    let (show_id, episode_number) = allanime_stream_parts_from_streams_url(streams_url)
+        .ok_or_else(|| "AllAnime stream URL was invalid.".to_string())?;
+    let media_title = episode_title
+        .map(|title| format!("{series_title} - {title}"))
+        .unwrap_or_else(|| series_title.to_string());
+
+    Ok(allanime::fetch_streams(&show_id, &episode_number)?
+        .into_iter()
+        .map(|stream_result| {
+            let http_headers = stream_result
+                .http_headers
+                .into_iter()
+                .map(|(name, value)| InternetMediaHttpHeader { name, value })
+                .collect::<Vec<_>>();
+
+            SourceStreamResult {
+                quality: stream_result.quality.clone(),
+                media: InternetMedia {
+                    provider_id: provider.id.clone(),
+                    provider_name: provider.name.clone(),
+                    title: media_title.clone(),
+                    series_title: Some(series_title.to_string()),
+                    episode_title: episode_title.map(ToString::to_string),
+                    episode_number: Some(episode_number.clone()),
+                    subtitle: stream_result.subtitle,
+                    stream_url: stream_result.stream_url,
+                    thumbnail_url: None,
+                    http_headers,
+                },
+            }
+        })
+        .collect())
+}
+
+fn parse_source_stream_result(
+    provider: &SourceProvider,
+    series_title: &str,
+    episode_title: Option<&str>,
+    stream_value: &Value,
+) -> Option<SourceStreamResult> {
+    let stream_url = playable_stream_url(stream_value, true)?;
+    let quality = text_json_field(stream_value, &["quality", "label", "resolution", "name"]);
+    let media_title = episode_title
+        .map(|title| format!("{series_title} - {title}"))
+        .unwrap_or_else(|| series_title.to_string());
+    let subtitle = quality
+        .as_ref()
+        .map(|quality| format!("{} / {quality}", provider.name))
+        .or_else(|| Some(provider.name.clone()));
+
+    Some(SourceStreamResult {
+        media: InternetMedia {
+            provider_id: provider.id.clone(),
+            provider_name: provider.name.clone(),
+            title: media_title,
+            series_title: Some(series_title.to_string()),
+            episode_title: episode_title.map(ToString::to_string),
+            episode_number: episode_title.and_then(source_episode_number_from_text),
+            subtitle,
+            stream_url,
+            thumbnail_url: None,
+            http_headers: Vec::new(),
+        },
+        quality,
+    })
+}
+
+fn fetch_source_json(
+    provider: &SourceProvider,
+    source_url: &str,
+    action: &str,
+) -> Result<Value, String> {
+    let response = ureq::get(source_url)
+        .timeout(Duration::from_secs(15))
+        .call()
+        .map_err(|error| format!("{} {action} request failed: {error}", provider.name))?;
+    response.into_json::<Value>().map_err(|error| {
+        format!(
+            "{} returned invalid JSON for {action}: {error}",
+            provider.name
+        )
+    })
+}
+
+fn source_result_values<'a>(response_json: &'a Value, candidate_keys: &[&str]) -> Vec<&'a Value> {
+    if let Some(results) = response_json.as_array() {
+        return results.iter().collect();
+    }
+
+    for key in candidate_keys {
+        if let Some(results) = response_json.get(*key).and_then(Value::as_array) {
+            return results.iter().collect();
+        }
+    }
+
+    for wrapper_key in ["data", "payload", "response"] {
+        if let Some(wrapper_value) = response_json.get(wrapper_key) {
+            let nested_results = source_result_values(wrapper_value, candidate_keys);
+            if !nested_results.is_empty() {
+                return nested_results;
+            }
+        }
+    }
+
+    if response_json.is_object() {
+        vec![response_json]
+    } else {
+        Vec::new()
+    }
+}
+
+fn source_series_item_id(value: &Value) -> Option<String> {
+    text_json_field(
+        value,
+        &[
+            "id",
+            "slug",
+            "anime_id",
+            "animeId",
+            "series_id",
+            "seriesId",
+            "malId",
+            "anilistId",
+        ],
+    )
+}
+
+fn source_episode_item_id(value: &Value) -> Option<String> {
+    text_json_field(
+        value,
+        &[
+            "episode_id",
+            "episodeId",
+            "id",
+            "slug",
+            "number",
+            "episodeNumber",
+            "episode_number",
+        ],
+    )
+}
+
+fn source_search_result_has_episode_step(search_result: &SourceSearchResult) -> bool {
+    source_search_result_episodes_url(search_result).is_some()
+}
+
+fn source_search_result_has_stream_step(search_result: &SourceSearchResult) -> bool {
+    source_search_result_streams_url(search_result).is_some()
+}
+
+fn source_episode_result_has_stream_step(episode_result: &SourceEpisodeResult) -> bool {
+    source_episode_result_streams_url(episode_result).is_some()
+}
+
+fn source_search_result_episodes_url(search_result: &SourceSearchResult) -> Option<String> {
+    if is_allanime_provider(&search_result.provider) {
+        return search_result.episodes_url.clone().or_else(|| {
+            search_result
+                .item_id
+                .as_deref()
+                .map(allanime_episodes_source_url)
+        });
+    }
+
+    search_result
+        .episodes_url
+        .clone()
+        .filter(|url| is_http_url(url))
+        .or_else(|| {
+            search_result
+                .provider
+                .episodes_url_template
+                .as_deref()
+                .and_then(|template| {
+                    fill_source_url_template(
+                        template,
+                        &[
+                            ("id", search_result.item_id.as_deref()),
+                            ("series_id", search_result.item_id.as_deref()),
+                            ("title", Some(search_result.title.as_str())),
+                            ("query", Some(search_result.title.as_str())),
+                        ],
+                    )
+                })
+        })
+}
+
+fn source_search_result_streams_url(search_result: &SourceSearchResult) -> Option<String> {
+    if is_allanime_provider(&search_result.provider) {
+        return search_result.streams_url.clone();
+    }
+
+    search_result
+        .streams_url
+        .clone()
+        .filter(|url| is_http_url(url))
+        .or_else(|| {
+            search_result
+                .provider
+                .streams_url_template
+                .as_deref()
+                .and_then(|template| {
+                    fill_source_url_template(
+                        template,
+                        &[
+                            ("id", search_result.item_id.as_deref()),
+                            ("series_id", search_result.item_id.as_deref()),
+                            ("title", Some(search_result.title.as_str())),
+                            ("query", Some(search_result.title.as_str())),
+                        ],
+                    )
+                })
+        })
+}
+
+fn source_episode_result_streams_url(episode_result: &SourceEpisodeResult) -> Option<String> {
+    if is_allanime_provider(&episode_result.provider) {
+        return episode_result.streams_url.clone();
+    }
+
+    episode_result
+        .streams_url
+        .clone()
+        .filter(|url| is_http_url(url))
+        .or_else(|| {
+            episode_result
+                .provider
+                .streams_url_template
+                .as_deref()
+                .and_then(|template| {
+                    fill_source_url_template(
+                        template,
+                        &[
+                            ("id", episode_result.item_id.as_deref()),
+                            ("episode_id", episode_result.item_id.as_deref()),
+                            ("episode_title", Some(episode_result.title.as_str())),
+                            ("series_title", Some(episode_result.series_title.as_str())),
+                            ("title", Some(episode_result.title.as_str())),
+                        ],
+                    )
+                })
+        })
+}
+
+fn fill_source_url_template(
+    raw_url_template: &str,
+    replacements: &[(&str, Option<&str>)],
+) -> Option<String> {
+    let mut filled_url = raw_url_template.trim().to_string();
+    for (placeholder_name, replacement_value) in replacements {
+        let Some(replacement_value) = replacement_value else {
+            continue;
+        };
+        filled_url = filled_url.replace(
+            &format!("{{{placeholder_name}}}"),
+            &percent_encode_query_component(replacement_value),
+        );
+    }
+
+    if filled_url.contains('{') || filled_url.contains('}') || !is_http_url(&filled_url) {
+        return None;
+    }
+
+    Some(filled_url)
+}
+
+fn source_search_result_key(search_result: &SourceSearchResult) -> String {
+    let direct_stream_url = search_result
+        .direct_media
+        .as_ref()
+        .map(|media| media.stream_url.as_str())
+        .unwrap_or_default();
+    format!(
+        "{:016x}",
+        stable_hash_bytes(
+            format!(
+                "{}|{}|{}|{}|{}|{}|{}",
+                search_result.provider.id,
+                search_result.item_id.as_deref().unwrap_or_default(),
+                search_result.title,
+                search_result.episodes_url.as_deref().unwrap_or_default(),
+                search_result.streams_url.as_deref().unwrap_or_default(),
+                search_result.thumbnail_url.as_deref().unwrap_or_default(),
+                direct_stream_url
+            )
+            .as_bytes()
+        )
+    )
+}
+
+fn source_episode_result_key(episode_result: &SourceEpisodeResult) -> String {
+    let direct_stream_url = episode_result
+        .direct_media
+        .as_ref()
+        .map(|media| media.stream_url.as_str())
+        .unwrap_or_default();
+    format!(
+        "{:016x}",
+        stable_hash_bytes(
+            format!(
+                "{}|{}|{}|{}|{}",
+                episode_result.provider.id,
+                episode_result.series_title,
+                episode_result.item_id.as_deref().unwrap_or_default(),
+                episode_result.title,
+                direct_stream_url
+            )
+            .as_bytes()
+        )
+    )
+}
+
+fn source_search_result_kind_label(search_result: &SourceSearchResult) -> &'static str {
+    if search_result.direct_media.is_some() {
+        "Direct"
+    } else if source_search_result_has_episode_step(search_result) {
+        "Episodes"
+    } else if source_search_result_has_stream_step(search_result) {
+        "Streams"
+    } else {
+        "Source"
+    }
+}
+
+fn source_episode_result_kind_label(episode_result: &SourceEpisodeResult) -> &'static str {
+    if episode_result.direct_media.is_some() {
+        "Direct"
+    } else if source_episode_result_has_stream_step(episode_result) {
+        "Streams"
+    } else {
+        "Episode"
+    }
+}
+
+fn source_url_json_field(value: &Value, candidate_keys: &[&str]) -> Option<String> {
+    string_json_field(value, candidate_keys).filter(|url| is_http_url(url))
+}
+
+fn playable_stream_url(value: &Value, include_generic_url: bool) -> Option<String> {
+    let explicit_url = source_url_json_field(
+        value,
+        &[
+            "stream_url",
+            "streamUrl",
+            "play_url",
+            "playUrl",
+            "video_url",
+            "videoUrl",
+            "file_url",
+            "fileUrl",
+        ],
+    );
+    if explicit_url.is_some() || !include_generic_url {
+        return explicit_url;
+    }
+
+    source_url_json_field(value, &["url", "file", "src"])
+}
+
+fn text_json_field(value: &Value, candidate_keys: &[&str]) -> Option<String> {
+    candidate_keys.iter().find_map(|key| {
+        value.get(*key).and_then(|field_value| match field_value {
+            Value::String(text) => {
+                let trimmed_text = text.trim();
+                (!trimmed_text.is_empty()).then(|| trimmed_text.to_string())
+            }
+            Value::Number(number) => Some(number.to_string()),
+            Value::Bool(boolean) => Some(boolean.to_string()),
+            _ => None,
+        })
+    })
+}
+
+fn string_json_field(value: &Value, candidate_keys: &[&str]) -> Option<String> {
+    candidate_keys.iter().find_map(|key| {
+        value
+            .get(*key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|field_value| !field_value.is_empty())
+            .map(ToString::to_string)
+    })
+}
+
+fn is_http_url(url: &str) -> bool {
+    let lowercase_url = url.to_ascii_lowercase();
+    lowercase_url.starts_with("https://") || lowercase_url.starts_with("http://")
+}
+
+fn percent_encode_query_component(value: &str) -> String {
+    let mut encoded_value = String::new();
+
+    for byte in value.as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(*byte, b'-' | b'_' | b'.' | b'~') {
+            encoded_value.push(*byte as char);
+        } else {
+            encoded_value.push_str(&format!("%{byte:02X}"));
+        }
+    }
+
+    encoded_value
 }
 
 fn list_audio_output_devices(mpv_path: &Path) -> Vec<AudioOutputDeviceOption> {
@@ -9599,8 +13218,11 @@ fn library_item_for_media_path(path: &Path, prefer_episode_label: bool) -> Libra
         subtitle: None,
         episode_badge,
         thumbnail_media_path: Some(path.to_path_buf()),
+        thumbnail_url: None,
+        internet_media: None,
         resume_history_entry: None,
         is_watched: false,
+        is_internet_media: false,
         can_remove_from_continue_watching: false,
     }
 }
@@ -9612,8 +13234,13 @@ fn build_library_shelves(library: &PlayerLibrary, show_unwatched_only: bool) -> 
         .filter(|entry| entry.is_completed)
         .map(|entry| library_media_path_key(&entry.path))
         .collect::<HashSet<_>>();
-    let series_shelves =
+    let mut series_shelves =
         series_library_shelves(library, &watched_media_path_keys, show_unwatched_only);
+    series_shelves.extend(source_media_series_library_shelves(
+        library,
+        show_unwatched_only,
+    ));
+    series_shelves.sort_by(|left, right| compare_natural_text(&left.title, &right.title));
     let grouped_media_paths = series_shelves
         .iter()
         .flat_map(|shelf| shelf.items.iter().map(|item| item.path.clone()))
@@ -9647,6 +13274,209 @@ fn build_library_shelves(library: &PlayerLibrary, show_unwatched_only: bool) -> 
         .into_iter()
         .filter(|shelf| !shelf.items.is_empty())
         .collect()
+}
+
+#[derive(Clone)]
+struct SourceMediaIdentity {
+    display_series_title: String,
+    normalized_series_key: String,
+    episode_number: Option<String>,
+    episode_sort_number: Option<f64>,
+    episode_title: Option<String>,
+}
+
+fn source_media_series_library_shelves(
+    library: &PlayerLibrary,
+    show_unwatched_only: bool,
+) -> Vec<LibraryShelf> {
+    let completed_internet_media_keys = library
+        .internet_media_history
+        .iter()
+        .filter(|entry| entry.is_completed)
+        .map(|entry| internet_media_key(&entry.media))
+        .collect::<HashSet<_>>();
+    let mut media_by_series_key: HashMap<String, Vec<(SourceMediaIdentity, InternetMedia)>> =
+        HashMap::new();
+    let mut display_title_by_series_key: HashMap<String, String> = HashMap::new();
+
+    for media in &library.recent_internet_media {
+        if show_unwatched_only && completed_internet_media_keys.contains(&internet_media_key(media))
+        {
+            continue;
+        }
+
+        let identity = source_media_identity(media);
+        display_title_by_series_key
+            .entry(identity.normalized_series_key.clone())
+            .or_insert_with(|| identity.display_series_title.clone());
+        media_by_series_key
+            .entry(identity.normalized_series_key.clone())
+            .or_default()
+            .push((identity, media.clone()));
+    }
+
+    let mut shelves = media_by_series_key
+        .into_iter()
+        .filter_map(|(series_key, mut entries)| {
+            entries.sort_by(compare_source_media_entries);
+            entries.dedup_by(|left, right| {
+                internet_media_key(&left.1) == internet_media_key(&right.1)
+            });
+
+            let title = display_title_by_series_key
+                .get(&series_key)
+                .cloned()
+                .unwrap_or_else(|| series_key.clone());
+            let subtitle = source_media_series_subtitle(&entries);
+            let items = entries
+                .into_iter()
+                .take(MAX_LIBRARY_ITEMS_PER_SHELF)
+                .map(|(identity, media)| {
+                    let mut item = source_media_library_item(&media, &identity);
+                    item.is_watched =
+                        completed_internet_media_keys.contains(&internet_media_key(&media));
+                    item
+                })
+                .collect::<Vec<_>>();
+
+            (!items.is_empty()).then(|| LibraryShelf {
+                key: format!("source-series-{series_key}"),
+                title,
+                subtitle,
+                empty_message: "No episodes found.",
+                items,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    shelves.sort_by(|left, right| compare_natural_text(&left.title, &right.title));
+    shelves
+}
+
+fn source_media_library_item(
+    media: &InternetMedia,
+    identity: &SourceMediaIdentity,
+) -> LibraryGridItem {
+    LibraryGridItem {
+        path: internet_media_library_path(media),
+        title: identity
+            .episode_title
+            .clone()
+            .unwrap_or_else(|| media.title.clone()),
+        subtitle: media
+            .subtitle
+            .clone()
+            .or_else(|| Some(media.provider_name.clone())),
+        episode_badge: identity.episode_number.clone(),
+        thumbnail_media_path: None,
+        thumbnail_url: media.thumbnail_url.clone(),
+        internet_media: Some(media.clone()),
+        resume_history_entry: None,
+        is_watched: false,
+        is_internet_media: true,
+        can_remove_from_continue_watching: false,
+    }
+}
+
+fn source_media_identity(media: &InternetMedia) -> SourceMediaIdentity {
+    let (series_title_from_title, episode_title_from_title) =
+        split_source_media_title(&media.title);
+    let display_series_title = media
+        .series_title
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .map(ToString::to_string)
+        .or(series_title_from_title)
+        .unwrap_or_else(|| media.title.clone());
+    let episode_title = media
+        .episode_title
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .map(ToString::to_string)
+        .or(episode_title_from_title);
+    let episode_number = media
+        .episode_number
+        .as_deref()
+        .map(str::trim)
+        .filter(|number| !number.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| {
+            episode_title
+                .as_deref()
+                .and_then(source_episode_number_from_text)
+        })
+        .or_else(|| source_episode_number_from_text(&media.title));
+    let episode_sort_number = episode_number
+        .as_deref()
+        .and_then(|number| number.parse::<f64>().ok());
+
+    SourceMediaIdentity {
+        normalized_series_key: normalized_series_key(&display_series_title),
+        display_series_title,
+        episode_number,
+        episode_sort_number,
+        episode_title,
+    }
+}
+
+fn split_source_media_title(title: &str) -> (Option<String>, Option<String>) {
+    title
+        .split_once(" - ")
+        .map(|(series_title, episode_title)| {
+            (
+                Some(series_title.trim().to_string()).filter(|title| !title.is_empty()),
+                Some(episode_title.trim().to_string()).filter(|title| !title.is_empty()),
+            )
+        })
+        .unwrap_or((None, None))
+}
+
+fn source_episode_number_from_text(text: &str) -> Option<String> {
+    let lowercase_text = text.to_ascii_lowercase();
+    let episode_index = lowercase_text.find("episode")?;
+    let number_start = skip_ascii_separators(&lowercase_text, episode_index + "episode".len());
+    let bytes = lowercase_text.as_bytes();
+    let mut number_end = number_start;
+
+    while number_end < bytes.len()
+        && (bytes[number_end].is_ascii_digit() || bytes[number_end] == b'.')
+    {
+        number_end += 1;
+    }
+
+    (number_end > number_start).then(|| lowercase_text[number_start..number_end].to_string())
+}
+
+fn source_media_series_subtitle(
+    entries: &[(SourceMediaIdentity, InternetMedia)],
+) -> Option<String> {
+    let mut provider_names = entries
+        .iter()
+        .map(|(_, media)| media.provider_name.clone())
+        .filter(|provider_name| !provider_name.trim().is_empty())
+        .collect::<Vec<_>>();
+
+    provider_names.sort_by(|left, right| compare_natural_text(left, right));
+    provider_names.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+
+    if provider_names.is_empty() {
+        None
+    } else {
+        Some(provider_names.join(" / "))
+    }
+}
+
+fn compare_source_media_entries(
+    left: &(SourceMediaIdentity, InternetMedia),
+    right: &(SourceMediaIdentity, InternetMedia),
+) -> std::cmp::Ordering {
+    left.0
+        .episode_sort_number
+        .partial_cmp(&right.0.episode_sort_number)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| compare_natural_text(&left.1.title, &right.1.title))
 }
 
 fn continue_watching_library_items(library: &PlayerLibrary) -> Vec<LibraryGridItem> {
@@ -9702,8 +13532,11 @@ fn pinned_folder_library_items(library: &PlayerLibrary) -> Vec<LibraryGridItem> 
             subtitle: Some("Pinned folder".to_string()),
             episode_badge: None,
             thumbnail_media_path: None,
+            thumbnail_url: None,
+            internet_media: None,
             resume_history_entry: None,
             is_watched: false,
+            is_internet_media: false,
             can_remove_from_continue_watching: false,
         })
         .collect()
@@ -9938,6 +13771,30 @@ fn library_thumbnail_media_paths(library: &PlayerLibrary) -> Vec<PathBuf> {
     media_paths
 }
 
+fn internet_library_thumbnail_urls(library: &PlayerLibrary) -> Vec<String> {
+    let mut seen_thumbnail_urls = HashSet::new();
+    let mut thumbnail_urls = Vec::new();
+
+    for thumbnail_url in library
+        .recent_internet_media
+        .iter()
+        .chain(
+            library
+                .internet_media_history
+                .iter()
+                .map(|history_entry| &history_entry.media),
+        )
+        .filter_map(|media| media.thumbnail_url.clone())
+        .filter(|thumbnail_url| is_http_url(thumbnail_url))
+    {
+        if seen_thumbnail_urls.insert(thumbnail_url.clone()) {
+            thumbnail_urls.push(thumbnail_url);
+        }
+    }
+
+    thumbnail_urls
+}
+
 fn existing_library_thumbnail_path(media_path: &Path) -> Option<PathBuf> {
     let preferred_thumbnail_path = library_thumbnail_path(media_path);
     if preferred_thumbnail_path.is_file() {
@@ -9949,6 +13806,64 @@ fn existing_library_thumbnail_path(media_path: &Path) -> Option<PathBuf> {
 
 fn library_thumbnail_path(media_path: &Path) -> PathBuf {
     timeline_thumbnail_path(media_path, LIBRARY_THUMBNAIL_POSITION_SECONDS)
+}
+
+fn existing_remote_thumbnail_path(thumbnail_url: &str) -> Option<PathBuf> {
+    let thumbnail_path = remote_thumbnail_path(thumbnail_url);
+
+    thumbnail_path.is_file().then_some(thumbnail_path)
+}
+
+fn remote_thumbnail_path(thumbnail_url: &str) -> PathBuf {
+    watch_session_directory()
+        .join(THUMBNAIL_CACHE_DIRECTORY_NAME)
+        .join(format!(
+            "remote-{:016x}.img",
+            stable_hash_bytes(thumbnail_url.as_bytes())
+        ))
+}
+
+fn cache_remote_thumbnail(thumbnail_url: &str) -> Option<PathBuf> {
+    if !is_http_url(thumbnail_url) {
+        return None;
+    }
+
+    let thumbnail_path = remote_thumbnail_path(thumbnail_url);
+    if thumbnail_path.is_file() {
+        return Some(thumbnail_path);
+    }
+
+    if let Some(parent_directory) = thumbnail_path.parent() {
+        let _ = fs::create_dir_all(parent_directory);
+    }
+
+    let response = ureq::get(thumbnail_url)
+        .set("User-Agent", REMOTE_THUMBNAIL_USER_AGENT)
+        .set(
+            "Accept",
+            "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+        )
+        .timeout(Duration::from_secs(
+            REMOTE_THUMBNAIL_DOWNLOAD_TIMEOUT_SECONDS,
+        ))
+        .call()
+        .ok()?;
+    let mut response_reader = response.into_reader().take(10 * 1024 * 1024);
+    let mut thumbnail_bytes = Vec::new();
+    response_reader.read_to_end(&mut thumbnail_bytes).ok()?;
+    if thumbnail_bytes.is_empty() {
+        return None;
+    }
+
+    let temporary_path = thumbnail_path.with_extension("tmp");
+    fs::write(&temporary_path, thumbnail_bytes).ok()?;
+    match fs::rename(&temporary_path, &thumbnail_path) {
+        Ok(()) => Some(thumbnail_path),
+        Err(_) => {
+            let _ = fs::remove_file(&temporary_path);
+            None
+        }
+    }
 }
 
 fn first_existing_timeline_thumbnail_path(media_path: &Path) -> Option<PathBuf> {
@@ -10429,6 +14344,66 @@ fn run_application() {
             KeyBinding::new("-", DecreasePlaybackSpeed, Some(WATCH_PLAYER_KEY_CONTEXT)),
             KeyBinding::new("s", ToggleShuffle, Some(WATCH_PLAYER_KEY_CONTEXT)),
             KeyBinding::new("r", CycleRepeatMode, Some(WATCH_PLAYER_KEY_CONTEXT)),
+        ]);
+        cx.bind_keys([
+            KeyBinding::new("backspace", Backspace, Some(SOURCE_TEXT_INPUT_KEY_CONTEXT)),
+            KeyBinding::new("delete", Delete, Some(SOURCE_TEXT_INPUT_KEY_CONTEXT)),
+            KeyBinding::new("left", Left, Some(SOURCE_TEXT_INPUT_KEY_CONTEXT)),
+            KeyBinding::new("right", Right, Some(SOURCE_TEXT_INPUT_KEY_CONTEXT)),
+            KeyBinding::new(
+                "enter",
+                SubmitSourceSearch,
+                Some(SOURCE_TEXT_INPUT_KEY_CONTEXT),
+            ),
+            KeyBinding::new(
+                "return",
+                SubmitSourceSearch,
+                Some(SOURCE_TEXT_INPUT_KEY_CONTEXT),
+            ),
+            KeyBinding::new(
+                "up",
+                SelectPreviousSourceResult,
+                Some(SOURCE_TEXT_INPUT_KEY_CONTEXT),
+            ),
+            KeyBinding::new(
+                "down",
+                SelectNextSourceResult,
+                Some(SOURCE_TEXT_INPUT_KEY_CONTEXT),
+            ),
+            KeyBinding::new(
+                "shift-left",
+                SelectLeft,
+                Some(SOURCE_TEXT_INPUT_KEY_CONTEXT),
+            ),
+            KeyBinding::new(
+                "shift-right",
+                SelectRight,
+                Some(SOURCE_TEXT_INPUT_KEY_CONTEXT),
+            ),
+            KeyBinding::new("cmd-a", SelectAll, Some(SOURCE_TEXT_INPUT_KEY_CONTEXT)),
+            KeyBinding::new("ctrl-a", SelectAll, Some(SOURCE_TEXT_INPUT_KEY_CONTEXT)),
+            KeyBinding::new("home", Home, Some(SOURCE_TEXT_INPUT_KEY_CONTEXT)),
+            KeyBinding::new("end", End, Some(SOURCE_TEXT_INPUT_KEY_CONTEXT)),
+            KeyBinding::new("cmd-v", Paste, Some(SOURCE_TEXT_INPUT_KEY_CONTEXT)),
+            KeyBinding::new("ctrl-v", Paste, Some(SOURCE_TEXT_INPUT_KEY_CONTEXT)),
+            KeyBinding::new("cmd-c", Copy, Some(SOURCE_TEXT_INPUT_KEY_CONTEXT)),
+            KeyBinding::new("ctrl-c", Copy, Some(SOURCE_TEXT_INPUT_KEY_CONTEXT)),
+            KeyBinding::new("cmd-x", Cut, Some(SOURCE_TEXT_INPUT_KEY_CONTEXT)),
+            KeyBinding::new("ctrl-x", Cut, Some(SOURCE_TEXT_INPUT_KEY_CONTEXT)),
+        ]);
+        cx.bind_keys([
+            KeyBinding::new("enter", SubmitSourceSearch, Some(WATCH_DIALOG_KEY_CONTEXT)),
+            KeyBinding::new("return", SubmitSourceSearch, Some(WATCH_DIALOG_KEY_CONTEXT)),
+            KeyBinding::new(
+                "up",
+                SelectPreviousSourceResult,
+                Some(WATCH_DIALOG_KEY_CONTEXT),
+            ),
+            KeyBinding::new(
+                "down",
+                SelectNextSourceResult,
+                Some(WATCH_DIALOG_KEY_CONTEXT),
+            ),
         ]);
 
         let bounds = initial_window_bounds(&initial_player_settings, cx);

@@ -12,6 +12,11 @@ rfd = "0.15"
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+aes = "0.8"
+base64 = "0.22"
+ctr = "0.9"
+sha2 = "0.10"
+ureq = { version = "2", features = ["json"] }
 
 [build-dependencies]
 embed-resource = "3.0.9"
