@@ -15,11 +15,12 @@ use std::{
 use std::os::windows::process::CommandExt;
 
 use gpui::{
-    actions, canvas, div, img, linear_color_stop, linear_gradient, point, prelude::*, px, relative,
-    rgb, size, svg, Animation, AnimationExt, AnyElement, App, Bounds, Context, Div, ExternalPaths,
-    FocusHandle, Focusable, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ObjectFit, PathPromptOptions, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent,
-    SharedString, TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions,
+    actions, canvas, div, ease_in_out, img, linear_color_stop, linear_gradient, point, prelude::*,
+    px, relative, rgb, size, svg, Animation, AnimationExt, AnyElement, App, Bounds, Context, Div,
+    ExternalPaths, FocusHandle, Focusable, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ObjectFit, PathPromptOptions, Pixels, Point, Render, ScrollDelta,
+    ScrollWheelEvent, SharedString, TitlebarOptions, Transformation, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowOptions,
 };
 use gpui_platform::application;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -47,17 +48,49 @@ const MUTED_TEXT: u32 = 0x9a9a9a;
 const FINE_BORDER: u32 = 0x242424;
 const BRIGHT_BORDER: u32 = 0x6a6a6a;
 const VLC_ORANGE: u32 = 0xff8a2a;
+const BACKDROP_BLUR_BASE_BACKGROUND_ALPHA: f32 = 0.82;
+const BACKDROP_BLUR_VIDEO_SURFACE_ALPHA: f32 = 0.88;
+const BACKDROP_BLUR_LIBRARY_BACKGROUND_ALPHA: f32 = 0.78;
+const BACKDROP_BLUR_MENU_BACKGROUND_ALPHA: f32 = 0.82;
+const BACKDROP_BLUR_MODAL_BACKDROP_ALPHA: f32 = 0.54;
+const BACKDROP_BLUR_MODAL_BACKGROUND_ALPHA: f32 = 0.86;
+const BACKDROP_BLUR_FLOATING_CONTROL_ALPHA: f32 = 0.70;
+const CONTINUE_REMOVE_HOVER_SCALE: f32 = 1.36;
+const CONTINUE_REMOVE_SCALE_ANIMATION_MS: u64 = 140;
+const LIBRARY_ICON_HOVER_SCALE: f32 = 1.22;
+const LIBRARY_ICON_SCALE_ANIMATION_MS: u64 = 140;
 const CONTROLS_HIDE_DELAY_MS: u64 = 500;
+const CONTROLS_REVEAL_THROTTLE_MS: u128 = 250;
 const PLAYBACK_STATE_POLL_MS: u64 = 250;
 const OSD_HIDE_DELAY_MS: u64 = 1200;
 const TIMELINE_THUMBNAIL_INTERVAL_SECONDS: u64 = 5;
-const TIMELINE_SCRUB_MIN_DELTA_SECONDS: f64 = 0.35;
 const TIMELINE_HORIZONTAL_PADDING_PX: f32 = 16.0;
 const TIMELINE_TIME_LABEL_WIDTH_PX: f32 = 64.0;
 const TIMELINE_LABEL_GAP_PX: f32 = 16.0;
 const VIDEO_DOUBLE_CLICK_TOP_GUARD_PX: f32 = 112.0;
 const VIDEO_DOUBLE_CLICK_BOTTOM_GUARD_PX: f32 = 154.0;
+const LIVE_CAPTURE_AUDIO_BUFFER_MS: u16 = 20;
+const LIVE_CAPTURE_LAVF_BUFFER_SIZE_BYTES: usize = 4096;
+const LIVE_CAPTURE_PROBE_SIZE_BYTES: usize = 32;
+const LIVE_CAPTURE_RTBUF_SIZE: &str = "32M";
+const LIVE_CAPTURE_STREAM_BUFFER_SIZE: &str = "4k";
+const DIRECTSHOW_INTERNAL_AUDIO_PIN_NAME: &str = "Audio";
+const AUDIO_OUTPUT_AUTO_DEVICE_ID: &str = "auto";
+const LIVE_CAPTURE_AUDIO_SOURCE_AUTO: &str = "auto";
+const LIVE_CAPTURE_AUDIO_SOURCE_NONE: &str = "none";
 const LIBRARY_THUMBNAIL_POSITION_SECONDS: f64 = 45.0;
+const LIBRARY_HORIZONTAL_MARGIN_PX: f32 = 96.0;
+const LIBRARY_MAX_CONTENT_WIDTH_PX: f32 = 3200.0;
+const LIBRARY_PREFERRED_CARD_WIDTH_PX: f32 = 230.0;
+const LIBRARY_MIN_CARD_WIDTH_PX: f32 = 150.0;
+const LIBRARY_MAX_CARD_WIDTH_PX: f32 = 280.0;
+const LIBRARY_CARD_GAP_PX: f32 = 12.0;
+const LIBRARY_MIN_VISIBLE_CARD_COUNT: f32 = 2.0;
+const LIBRARY_MAX_VISIBLE_CARD_COUNT: f32 = 12.0;
+const LIBRARY_BASE_VIEWPORT_WIDTH_PX: f32 = 1500.0;
+const LIBRARY_BASE_VIEWPORT_HEIGHT_PX: f32 = 920.0;
+const LIBRARY_MIN_UI_SCALE: f32 = 1.0;
+const LIBRARY_MAX_UI_SCALE: f32 = 2.35;
 const MAX_LIBRARY_THUMBNAILS_TO_GENERATE: usize = 12;
 const LIBRARY_TITLE_LINE_HEIGHT_PX: f32 = 18.0;
 const LIBRARY_TITLE_AVERAGE_CHARACTER_WIDTH_PX: f32 = 7.2;
@@ -111,6 +144,33 @@ const ICON_CHEVRON_DOWN: &str = "chevron-down.svg";
 const ICON_EYE: &str = "eye.svg";
 const ICON_X: &str = "x.svg";
 
+const AUDIO_OUTPUT_DEVICE_OPTIONS: &[AudioOutputDeviceOption] = &[
+    AudioOutputDeviceOption {
+        label: "Auto",
+        device_id: AUDIO_OUTPUT_AUTO_DEVICE_ID,
+    },
+    AudioOutputDeviceOption {
+        label: "Corsair headset",
+        device_id: "wasapi/{d159af60-9aaa-450d-b790-de54421dcf35}",
+    },
+    AudioOutputDeviceOption {
+        label: "LG ULTRAGEAR",
+        device_id: "wasapi/{03f1f99e-7b9d-405e-bf61-8ed0d53ffb8a}",
+    },
+    AudioOutputDeviceOption {
+        label: "MAG monitor",
+        device_id: "wasapi/{02aff3bc-b2e1-4044-b3b6-a379b71151b2}",
+    },
+    AudioOutputDeviceOption {
+        label: "Beyond TV",
+        device_id: "wasapi/{52e9b06b-4cdb-48aa-8b6a-d686bf34a5d8}",
+    },
+    AudioOutputDeviceOption {
+        label: "Realtek Digital Output",
+        device_id: "wasapi/{58b20d2c-999a-40a0-adc6-f42bbfc94323}",
+    },
+];
+
 const VIDEO_EXTENSIONS: [&str; 20] = [
     "mkv", "mp4", "mov", "m4v", "3gp", "avi", "wmv", "asf", "ogm", "ogg", "flv", "webm", "mxf",
     "mpeg", "mpg", "m2ts", "ts", "vob", "divx", "dv",
@@ -138,12 +198,265 @@ actions!(
 );
 
 #[derive(Clone)]
+struct AudioOutputDeviceOption {
+    label: &'static str,
+    device_id: &'static str,
+}
+
+#[derive(Clone)]
+struct LiveCaptureDevice {
+    display_name: String,
+    backend_name: String,
+    audio_backend_name: Option<String>,
+    audio_pin_name: Option<String>,
+    latency_mode: LiveCaptureLatencyMode,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LiveCaptureLatencyMode {
+    UltraLow,
+    Stable,
+}
+
+#[derive(Clone)]
+struct LiveCaptureAudioDevice {
+    display_name: String,
+    backend_name: String,
+}
+
+struct LiveCaptureDeviceScan {
+    video_devices: Vec<LiveCaptureDevice>,
+    audio_devices: Vec<LiveCaptureAudioDevice>,
+}
+
+#[derive(Clone)]
+enum LoadedMediaSource {
+    File(PathBuf),
+    LiveCapture(LiveCaptureDevice),
+}
+
+#[derive(Clone)]
 struct LoadedMedia {
-    path: PathBuf,
+    source: LoadedMediaSource,
     duration_seconds: Option<f64>,
     audio_tracks: Vec<AudioTrack>,
     subtitle_paths: Vec<PathBuf>,
     embedded_subtitle_tracks: Vec<EmbeddedSubtitleTrack>,
+}
+
+impl LoadedMedia {
+    fn file_path(&self) -> Option<&Path> {
+        match &self.source {
+            LoadedMediaSource::File(path) => Some(path),
+            LoadedMediaSource::LiveCapture(_) => None,
+        }
+    }
+
+    fn display_title(&self) -> String {
+        match &self.source {
+            LoadedMediaSource::File(path) => display_name(path),
+            LoadedMediaSource::LiveCapture(device) => {
+                format!("Live Capture: {}", device.display_name)
+            }
+        }
+    }
+
+    fn display_detail(&self) -> String {
+        match &self.source {
+            LoadedMediaSource::File(path) => path.display().to_string(),
+            LoadedMediaSource::LiveCapture(device) => device.detail_label(),
+        }
+    }
+
+    fn queue_title(&self) -> String {
+        match &self.source {
+            LoadedMediaSource::File(path) => queue_display_name(path),
+            LoadedMediaSource::LiveCapture(device) => {
+                format!("Live Capture: {}", device.display_name)
+            }
+        }
+    }
+
+    fn append_mpv_input_args(&self, command: &mut Command, settings: &PlayerSettings) {
+        match &self.source {
+            LoadedMediaSource::File(path) => {
+                command.arg(path.as_os_str());
+            }
+            LoadedMediaSource::LiveCapture(device) => {
+                device.append_mpv_input_args(command, settings);
+            }
+        }
+    }
+
+    fn is_seekable_file(&self) -> bool {
+        self.file_path().is_some()
+    }
+
+    fn is_live_capture(&self) -> bool {
+        matches!(self.source, LoadedMediaSource::LiveCapture(_))
+    }
+
+    fn live_capture_device(&self) -> Option<&LiveCaptureDevice> {
+        match &self.source {
+            LoadedMediaSource::LiveCapture(device) => Some(device),
+            LoadedMediaSource::File(_) => None,
+        }
+    }
+}
+
+impl LiveCaptureDevice {
+    fn detail_label(&self) -> String {
+        #[cfg(target_os = "windows")]
+        {
+            if self.audio_pin_name.is_some() {
+                "DirectShow video + internal audio capture device".to_string()
+            } else if self.audio_backend_name.is_some() {
+                "DirectShow video + audio capture device".to_string()
+            } else {
+                "DirectShow video capture device".to_string()
+            }
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            format!("Live capture device: {}", self.backend_name)
+        }
+    }
+
+    fn append_mpv_input_args(&self, command: &mut Command, settings: &PlayerSettings) {
+        #[cfg(target_os = "windows")]
+        {
+            match self.latency_mode {
+                LiveCaptureLatencyMode::UltraLow => {
+                    append_ultra_low_latency_live_capture_args(
+                        command,
+                        settings.is_lowest_latency_live_capture_enabled,
+                        settings.is_live_capture_exclusive_audio_enabled,
+                    );
+                }
+                LiveCaptureLatencyMode::Stable => {
+                    append_stable_live_capture_args(
+                        command,
+                        settings.is_lowest_latency_live_capture_enabled,
+                        settings.is_live_capture_exclusive_audio_enabled,
+                    );
+                }
+            }
+            if let Some(audio_pin_name) = self.audio_pin_name.as_deref() {
+                command.arg(format!(
+                    "--demuxer-lavf-o-add=audio_pin_name={audio_pin_name}"
+                ));
+            }
+            command.arg(directshow_capture_url(
+                &self.backend_name,
+                self.audio_backend_name.as_deref(),
+            ));
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            command.arg(&self.backend_name);
+        }
+    }
+}
+
+impl LiveCaptureDevice {
+    fn with_latency_mode(&self, latency_mode: LiveCaptureLatencyMode) -> Self {
+        let mut device = self.clone();
+        device.latency_mode = latency_mode;
+        device
+    }
+
+    fn without_audio(&self) -> Self {
+        let mut device = self.clone();
+        device.audio_backend_name = None;
+        device.audio_pin_name = None;
+        device
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn append_ultra_low_latency_live_capture_args(
+    command: &mut Command,
+    is_lowest_latency_live_capture_enabled: bool,
+    is_live_capture_exclusive_audio_enabled: bool,
+) {
+    command
+        .arg("--no-config")
+        .arg("--hwdec=no")
+        .arg("--cache=no")
+        .arg("--profile=low-latency")
+        .arg("--audio-buffer=0")
+        .arg("--untimed")
+        .arg("--video-sync=display-desync")
+        .arg("--framedrop=decoder+vo")
+        .arg("--demuxer-lavf-probe-info=no")
+        .arg(format!(
+            "--demuxer-lavf-probesize={LIVE_CAPTURE_PROBE_SIZE_BYTES}"
+        ))
+        .arg("--demuxer-lavf-analyzeduration=0")
+        .arg(format!(
+            "--demuxer-lavf-buffersize={LIVE_CAPTURE_LAVF_BUFFER_SIZE_BYTES}"
+        ))
+        .arg(format!(
+            "--stream-buffer-size={LIVE_CAPTURE_STREAM_BUFFER_SIZE}"
+        ))
+        .arg("--opengl-swapinterval=0")
+        .arg("--opengl-dwmflush=no")
+        .arg("--demuxer-lavf-o-add=fflags=+nobuffer")
+        .arg(format!(
+            "--demuxer-lavf-o-add=rtbufsize={LIVE_CAPTURE_RTBUF_SIZE}"
+        ))
+        .arg(format!(
+            "--demuxer-lavf-o-add=audio_buffer_size={LIVE_CAPTURE_AUDIO_BUFFER_MS}"
+        ));
+
+    if is_lowest_latency_live_capture_enabled {
+        append_lowest_latency_live_capture_args(command, is_live_capture_exclusive_audio_enabled);
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn append_stable_live_capture_args(
+    command: &mut Command,
+    is_lowest_latency_live_capture_enabled: bool,
+    is_live_capture_exclusive_audio_enabled: bool,
+) {
+    command
+        .arg("--no-config")
+        .arg("--hwdec=no")
+        .arg("--cache=no")
+        .arg("--profile=low-latency")
+        .arg("--audio-buffer=0")
+        .arg("--framedrop=vo")
+        .arg("--demuxer-lavf-o-add=fflags=+nobuffer")
+        .arg("--demuxer-lavf-o-add=rtbufsize=64M")
+        .arg("--demuxer-lavf-o-add=audio_buffer_size=50");
+
+    if is_lowest_latency_live_capture_enabled {
+        append_lowest_latency_live_capture_args(command, is_live_capture_exclusive_audio_enabled);
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn append_lowest_latency_live_capture_args(
+    command: &mut Command,
+    is_live_capture_exclusive_audio_enabled: bool,
+) {
+    command
+        .arg("--ao=wasapi")
+        .arg("--audio-channels=stereo")
+        .arg("--audio-samplerate=48000")
+        .arg("--video-latency-hacks=yes")
+        .arg("--swapchain-depth=1")
+        .arg("--d3d11-sync-interval=0")
+        .arg("--priority=high");
+
+    if is_live_capture_exclusive_audio_enabled {
+        command
+            .arg("--audio-exclusive=yes")
+            .arg("--wasapi-exclusive-buffer=min");
+    }
 }
 
 #[derive(Clone)]
@@ -208,14 +521,6 @@ impl ResumeBehavior {
         }
     }
 
-    fn next(self) -> Self {
-        match self {
-            Self::Ask => Self::Always,
-            Self::Always => Self::Never,
-            Self::Never => Self::Ask,
-        }
-    }
-
     fn as_str(self) -> &'static str {
         match self {
             Self::Ask => "ask",
@@ -240,8 +545,13 @@ struct PlayerSettings {
     preferred_audio_language: String,
     preferred_subtitle_language: String,
     prefer_embedded_subtitles: bool,
+    audio_output_device: String,
+    live_capture_audio_source: String,
+    is_lowest_latency_live_capture_enabled: bool,
+    is_live_capture_exclusive_audio_enabled: bool,
     hardware_decoding_mode: String,
     start_fullscreen: bool,
+    is_backdrop_blur_enabled: bool,
     subtitle_font_size: u8,
     subtitle_color: String,
     subtitle_position_percent: u8,
@@ -255,11 +565,34 @@ impl Default for PlayerSettings {
             preferred_audio_language: "eng".to_string(),
             preferred_subtitle_language: "eng".to_string(),
             prefer_embedded_subtitles: true,
+            audio_output_device: AUDIO_OUTPUT_AUTO_DEVICE_ID.to_string(),
+            live_capture_audio_source: LIVE_CAPTURE_AUDIO_SOURCE_AUTO.to_string(),
+            is_lowest_latency_live_capture_enabled: true,
+            is_live_capture_exclusive_audio_enabled: false,
             hardware_decoding_mode: "auto-safe".to_string(),
             start_fullscreen: false,
+            is_backdrop_blur_enabled: false,
             subtitle_font_size: 48,
             subtitle_color: "#FFFFFF".to_string(),
             subtitle_position_percent: 95,
+        }
+    }
+}
+
+impl PlayerSettings {
+    fn window_background_appearance(&self) -> WindowBackgroundAppearance {
+        if self.is_backdrop_blur_enabled {
+            WindowBackgroundAppearance::Blurred
+        } else {
+            WindowBackgroundAppearance::Transparent
+        }
+    }
+
+    fn surface_background_color(&self, solid_color: u32, backdrop_blur_alpha: f32) -> gpui::Rgba {
+        if self.is_backdrop_blur_enabled {
+            rgb_alpha(solid_color, backdrop_blur_alpha)
+        } else {
+            rgb(solid_color)
         }
     }
 }
@@ -375,6 +708,56 @@ enum ContextMenuSection {
     Queue,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettingsSelectorKind {
+    AudioOutput,
+    ResumeBehavior,
+    PreferredAudioLanguage,
+    PreferredSubtitleLanguage,
+    HardwareDecoding,
+    StartFullscreen,
+    LiveLowestLatency,
+    LiveCaptureExclusiveAudio,
+    BackdropBlur,
+}
+
+impl SettingsSelectorKind {
+    fn title(self) -> &'static str {
+        match self {
+            Self::AudioOutput => "Audio Output",
+            Self::ResumeBehavior => "Resume",
+            Self::PreferredAudioLanguage => "Audio Language",
+            Self::PreferredSubtitleLanguage => "Subtitle Language",
+            Self::HardwareDecoding => "Hardware Decode",
+            Self::StartFullscreen => "Start Fullscreen",
+            Self::LiveLowestLatency => "Live Lowest Latency",
+            Self::LiveCaptureExclusiveAudio => "Exclusive Audio",
+            Self::BackdropBlur => "Backdrop Blur",
+        }
+    }
+}
+
+#[derive(Clone)]
+enum SettingsSelectorChoice {
+    AudioOutputDevice(String),
+    ResumeBehavior(ResumeBehavior),
+    PreferredAudioLanguage(String),
+    PreferredSubtitleLanguage(String),
+    HardwareDecodingMode(String),
+    StartFullscreen(bool),
+    LiveLowestLatency(bool),
+    LiveCaptureExclusiveAudio(bool),
+    BackdropBlur(bool),
+}
+
+#[derive(Clone)]
+struct SettingsSelectorOption {
+    label: String,
+    detail: Option<String>,
+    is_selected: bool,
+    choice: SettingsSelectorChoice,
+}
+
 #[derive(Clone)]
 struct SavedWatchSession {
     media_paths: Vec<PathBuf>,
@@ -412,20 +795,33 @@ struct OledVlcPlayer {
     is_shuffle_enabled: bool,
     repeat_mode: PlaybackRepeatMode,
     are_controls_visible: bool,
+    is_pointer_over_player_overlay: bool,
     controls_visibility_generation: u64,
+    last_controls_reveal_millis: u128,
     osd_message: Option<SharedString>,
     osd_generation: u64,
     is_main_menu_open: bool,
     is_subtitle_menu_open: bool,
     is_settings_modal_open: bool,
     is_library_open: bool,
+    is_live_capture_menu_open: bool,
+    is_live_capture_scan_pending: bool,
+    open_settings_selector: Option<SettingsSelectorKind>,
     subtitle_menu_anchor: Option<Point<Pixels>>,
     library_context_menu_anchor: Option<Point<Pixels>>,
     library_context_menu_media_path: Option<PathBuf>,
+    hovered_continue_remove_media_path: Option<PathBuf>,
+    exiting_continue_remove_media_path: Option<PathBuf>,
+    continue_remove_scale_animation_generation: u64,
+    hovered_library_icon_key: Option<String>,
+    exiting_library_icon_key: Option<String>,
+    library_icon_scale_animation_generation: u64,
     open_context_menu_section: Option<ContextMenuSection>,
     pending_watch_session: Option<SavedWatchSession>,
     settings: PlayerSettings,
     library: PlayerLibrary,
+    live_capture_devices: Vec<LiveCaptureDevice>,
+    live_capture_audio_devices: Vec<LiveCaptureAudioDevice>,
     library_shelf_offsets: HashMap<String, usize>,
     collapsed_library_shelf_keys: HashSet<String>,
     dependency_status: DependencyStatus,
@@ -438,11 +834,13 @@ struct OledVlcPlayer {
     video_host_window: Option<EmbeddedVideoHost>,
     playback_process: Option<Child>,
     playback_ipc_path: Option<String>,
+    playback_log_path: Option<PathBuf>,
 }
 
 impl OledVlcPlayer {
     fn new(initial_media_paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let settings = load_player_settings();
+        window.set_background_appearance(settings.window_background_appearance());
         let dependency_status = detect_dependency_status();
         let pending_watch_session = match settings.resume_behavior {
             ResumeBehavior::Ask | ResumeBehavior::Always => load_saved_watch_session(),
@@ -472,20 +870,33 @@ impl OledVlcPlayer {
             is_shuffle_enabled: false,
             repeat_mode: PlaybackRepeatMode::Off,
             are_controls_visible: true,
+            is_pointer_over_player_overlay: false,
             controls_visibility_generation: 0,
+            last_controls_reveal_millis: 0,
             osd_message: None,
             osd_generation: 0,
             is_main_menu_open: false,
             is_subtitle_menu_open: false,
             is_settings_modal_open: false,
             is_library_open: initial_media_paths.is_empty(),
+            is_live_capture_menu_open: false,
+            is_live_capture_scan_pending: false,
+            open_settings_selector: None,
             subtitle_menu_anchor: None,
             library_context_menu_anchor: None,
             library_context_menu_media_path: None,
+            hovered_continue_remove_media_path: None,
+            exiting_continue_remove_media_path: None,
+            continue_remove_scale_animation_generation: 0,
+            hovered_library_icon_key: None,
+            exiting_library_icon_key: None,
+            library_icon_scale_animation_generation: 0,
             open_context_menu_section: None,
             pending_watch_session,
             settings,
             library: load_player_library(),
+            live_capture_devices: Vec::new(),
+            live_capture_audio_devices: Vec::new(),
             library_shelf_offsets: HashMap::new(),
             collapsed_library_shelf_keys: HashSet::new(),
             dependency_status,
@@ -498,6 +909,7 @@ impl OledVlcPlayer {
             video_host_window: None,
             playback_process: None,
             playback_ipc_path: None,
+            playback_log_path: None,
         };
         if !initial_media_paths.is_empty() {
             player.load_media_paths(initial_media_paths, window, cx);
@@ -523,28 +935,37 @@ impl OledVlcPlayer {
 
     fn current_media_title(&self) -> String {
         self.current_media()
-            .map(|media| display_name(&media.path))
+            .map(|media| {
+                media
+                    .file_path()
+                    .map(playback_display_title)
+                    .unwrap_or_else(|| media.display_title())
+            })
             .unwrap_or_else(|| "No media loaded".to_string())
     }
 
     fn current_media_detail(&self) -> String {
         self.current_media()
-            .map(|media| media.path.display().to_string())
-            .unwrap_or_else(|| "Use Menu > Play file, Play folder, or Play queue.".to_string())
+            .map(LoadedMedia::display_detail)
+            .unwrap_or_else(|| {
+                "Use Menu > Play file, Play folder, Play queue, or Live Capture.".to_string()
+            })
     }
 
     fn current_media_path(&self) -> Option<PathBuf> {
-        self.current_media().map(|media| media.path.clone())
+        self.current_media()
+            .and_then(LoadedMedia::file_path)
+            .map(Path::to_path_buf)
     }
 
     fn current_media_duration_seconds(&self) -> Option<f64> {
         self.current_media()
+            .filter(|media| media.is_seekable_file())
             .and_then(|media| media.duration_seconds)
             .filter(|duration_seconds| duration_seconds.is_finite() && *duration_seconds > 0.0)
     }
 
     fn current_watch_session(&self) -> Option<SavedWatchSession> {
-        let current_queue_index = self.current_queue_index?;
         let current_media_path = self.current_media_path()?;
         let playback_position_seconds = self.playback_position_seconds.max(0.0);
 
@@ -557,12 +978,17 @@ impl OledVlcPlayer {
         let media_paths = self
             .playback_queue
             .iter()
-            .map(|media| media.path.clone())
+            .filter_map(|media| media.file_path().map(Path::to_path_buf))
             .collect::<Vec<_>>();
 
         if media_paths.is_empty() {
             return None;
         }
+
+        let current_queue_index = media_paths
+            .iter()
+            .position(|media_path| media_path == &current_media_path)
+            .unwrap_or(0);
 
         Some(SavedWatchSession {
             media_paths,
@@ -594,10 +1020,11 @@ impl OledVlcPlayer {
             })
             .unwrap_or(false);
         let updated_at_millis = current_time_millis();
+        let current_media_path_key = library_media_path_key(&current_media_path);
 
         self.library
             .media_history
-            .retain(|entry| entry.path != current_media_path);
+            .retain(|entry| library_media_path_key(&entry.path) != current_media_path_key);
         self.library.media_history.insert(
             0,
             MediaHistoryEntry {
@@ -621,7 +1048,7 @@ impl OledVlcPlayer {
         let media_paths = self
             .playback_queue
             .iter()
-            .map(|media| media.path.clone())
+            .filter_map(|media| media.file_path().map(Path::to_path_buf))
             .collect::<Vec<_>>();
 
         for media_path in media_paths {
@@ -700,6 +1127,15 @@ impl OledVlcPlayer {
         self.current_media().is_some() && self.playback_process.is_some()
     }
 
+    fn is_current_media_live_capture(&self) -> bool {
+        self.current_media()
+            .is_some_and(LoadedMedia::is_live_capture)
+    }
+
+    fn is_library_surface_visible(&self) -> bool {
+        self.is_library_open || self.current_media().is_none()
+    }
+
     fn set_playback_position_seconds(&mut self, position_seconds: f64) {
         let max_position_seconds = self.current_media_duration_seconds().unwrap_or(0.0);
         self.playback_position_seconds = position_seconds.clamp(0.0, max_position_seconds);
@@ -729,12 +1165,18 @@ impl OledVlcPlayer {
                         cx.notify();
                         return;
                     }
-                } else if player.playback_process_has_exited() {
+                } else if let Some(exit_status) = player.playback_process_exit_status() {
+                    if player.retry_live_capture_after_startup_failure(window, cx) {
+                        cx.notify();
+                        return;
+                    }
+
+                    let exit_message = player.playback_backend_exit_message(exit_status);
                     player.is_playing = false;
                     player.playback_progress_generation += 1;
                     player.playback_process = None;
                     player.playback_ipc_path = None;
-                    player.status_message = Some("Playback backend exited.".into());
+                    player.status_message = Some(exit_message.into());
                     cx.notify();
                     return;
                 }
@@ -811,12 +1253,72 @@ impl OledVlcPlayer {
         false
     }
 
-    fn playback_process_has_exited(&mut self) -> bool {
+    fn playback_process_exit_status(&mut self) -> Option<std::process::ExitStatus> {
         self.playback_process
             .as_mut()
             .and_then(|process| process.try_wait().ok())
             .flatten()
-            .is_some()
+    }
+
+    fn retry_live_capture_after_startup_failure(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(current_queue_index) = self.current_queue_index else {
+            return false;
+        };
+        let Some(current_device) = self
+            .playback_queue
+            .get(current_queue_index)
+            .and_then(LoadedMedia::live_capture_device)
+            .cloned()
+        else {
+            return false;
+        };
+
+        let retry_device = match current_device.latency_mode {
+            LiveCaptureLatencyMode::UltraLow => {
+                Some(current_device.with_latency_mode(LiveCaptureLatencyMode::Stable))
+            }
+            LiveCaptureLatencyMode::Stable if current_device.audio_backend_name.is_some() => {
+                Some(current_device.without_audio())
+            }
+            LiveCaptureLatencyMode::Stable => None,
+        };
+        let Some(retry_device) = retry_device else {
+            return false;
+        };
+        let retry_status_message = if retry_device.audio_backend_name.is_some() {
+            "Retrying live capture with stable low-latency mode."
+        } else {
+            "Audio capture failed; retrying live capture without audio."
+        };
+
+        if let Some(current_media) = self.playback_queue.get_mut(current_queue_index) {
+            current_media.source = LoadedMediaSource::LiveCapture(retry_device);
+        }
+
+        self.status_message = Some(retry_status_message.into());
+        self.start_current_media_playback(window, cx);
+        true
+    }
+
+    fn playback_backend_exit_message(&self, exit_status: std::process::ExitStatus) -> String {
+        let exit_label = exit_status
+            .code()
+            .map(|exit_code| format!("exit code {exit_code}"))
+            .unwrap_or_else(|| "terminated".to_string());
+
+        if let Some(log_message) = self
+            .playback_log_path
+            .as_ref()
+            .and_then(|log_path| concise_mpv_log_message(log_path))
+        {
+            format!("Playback backend exited ({exit_label}): {log_message}")
+        } else {
+            format!("Playback backend exited ({exit_label}).")
+        }
     }
 
     fn handle_end_of_current_media(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -842,9 +1344,17 @@ impl OledVlcPlayer {
     }
 
     fn reveal_controls(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let current_time_millis = current_time_millis();
+        let should_reschedule_hide = !self.are_controls_visible
+            || current_time_millis.saturating_sub(self.last_controls_reveal_millis)
+                >= CONTROLS_REVEAL_THROTTLE_MS;
+
         self.are_controls_visible = true;
-        self.controls_visibility_generation += 1;
-        self.schedule_controls_hide(window, cx);
+        if should_reschedule_hide {
+            self.last_controls_reveal_millis = current_time_millis;
+            self.controls_visibility_generation += 1;
+            self.schedule_controls_hide(window, cx);
+        }
         cx.notify();
     }
 
@@ -860,6 +1370,8 @@ impl OledVlcPlayer {
                 if player.controls_visibility_generation == generation_to_hide
                     && !player.is_main_menu_open
                     && !player.is_subtitle_menu_open
+                    && !player.is_settings_modal_open
+                    && !player.is_pointer_over_player_overlay
                 {
                     player.are_controls_visible = false;
                     cx.notify();
@@ -867,6 +1379,26 @@ impl OledVlcPlayer {
             });
         })
         .detach();
+    }
+
+    fn set_player_overlay_hover(
+        &mut self,
+        is_hovered: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.is_pointer_over_player_overlay == is_hovered {
+            return;
+        }
+
+        self.is_pointer_over_player_overlay = is_hovered;
+        if is_hovered {
+            self.reveal_controls(window, cx);
+        } else {
+            self.controls_visibility_generation += 1;
+            self.schedule_controls_hide(window, cx);
+            cx.notify();
+        }
     }
 
     fn show_osd(&mut self, message: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -890,7 +1422,7 @@ impl OledVlcPlayer {
     }
 
     fn toggle_playback(&mut self, _: &TogglePlayback, window: &mut Window, cx: &mut Context<Self>) {
-        if self.current_media_path().is_some() {
+        if self.current_media().is_some() {
             if self.playback_process.is_none() {
                 self.start_current_media_playback(window, cx);
                 self.reveal_controls(window, cx);
@@ -911,7 +1443,7 @@ impl OledVlcPlayer {
             );
         } else {
             self.is_playing = false;
-            self.status_message = Some("Load a real media file before playback.".into());
+            self.status_message = Some("Load media or choose a live capture device first.".into());
         }
         self.reveal_controls(window, cx);
     }
@@ -968,15 +1500,6 @@ impl OledVlcPlayer {
         self.reveal_controls(window, cx);
     }
 
-    fn seek_to_timeline_fraction(
-        &mut self,
-        timeline_fraction: f64,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.apply_timeline_seek(timeline_fraction, true, true, window, cx);
-    }
-
     fn scrub_to_timeline_fraction(
         &mut self,
         timeline_fraction: f64,
@@ -1012,17 +1535,10 @@ impl OledVlcPlayer {
 
         let clamped_fraction = timeline_fraction.clamp(0.0, 1.0);
         let position_seconds = duration_seconds * clamped_fraction;
-        let last_backend_seek_position = self
-            .last_timeline_seek_position_seconds
-            .unwrap_or(self.playback_position_seconds);
-        let should_send_backend_seek = should_force_backend_seek
-            || (position_seconds - last_backend_seek_position).abs()
-                >= TIMELINE_SCRUB_MIN_DELTA_SECONDS;
-
         self.set_playback_position_seconds(position_seconds);
         self.is_eof_reached = false;
 
-        if should_send_backend_seek {
+        if should_force_backend_seek {
             self.send_mpv_command(json!(["seek", position_seconds, "absolute+exact"]));
             self.last_timeline_seek_position_seconds = Some(position_seconds);
         }
@@ -1046,7 +1562,7 @@ impl OledVlcPlayer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.current_media_path().is_none() {
+        if self.current_media_duration_seconds().is_none() {
             self.reveal_controls(window, cx);
             return;
         }
@@ -1287,7 +1803,9 @@ impl OledVlcPlayer {
     fn toggle_main_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.is_main_menu_open = !self.is_main_menu_open;
         self.is_subtitle_menu_open = false;
+        self.is_live_capture_menu_open = false;
         self.is_settings_modal_open = false;
+        self.open_settings_selector = None;
         self.subtitle_menu_anchor = None;
         self.library_context_menu_anchor = None;
         self.library_context_menu_media_path = None;
@@ -1303,7 +1821,9 @@ impl OledVlcPlayer {
     ) {
         self.is_subtitle_menu_open = true;
         self.is_main_menu_open = false;
+        self.is_live_capture_menu_open = false;
         self.is_settings_modal_open = false;
+        self.open_settings_selector = None;
         self.subtitle_menu_anchor = Some(anchor);
         self.library_context_menu_anchor = None;
         self.library_context_menu_media_path = None;
@@ -1314,7 +1834,9 @@ impl OledVlcPlayer {
     fn close_open_menus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.is_main_menu_open = false;
         self.is_subtitle_menu_open = false;
+        self.is_live_capture_menu_open = false;
         self.is_settings_modal_open = false;
+        self.open_settings_selector = None;
         self.subtitle_menu_anchor = None;
         self.library_context_menu_anchor = None;
         self.library_context_menu_media_path = None;
@@ -1324,8 +1846,10 @@ impl OledVlcPlayer {
 
     fn open_settings_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.is_settings_modal_open = true;
+        self.open_settings_selector = None;
         self.is_main_menu_open = false;
         self.is_subtitle_menu_open = false;
+        self.is_live_capture_menu_open = false;
         self.subtitle_menu_anchor = None;
         self.open_context_menu_section = None;
         self.reveal_controls(window, cx);
@@ -1333,6 +1857,7 @@ impl OledVlcPlayer {
 
     fn close_settings_modal(&mut self, cx: &mut Context<Self>) {
         self.is_settings_modal_open = false;
+        self.open_settings_selector = None;
         cx.notify();
     }
 
@@ -1346,7 +1871,9 @@ impl OledVlcPlayer {
         self.library_context_menu_media_path = Some(media_path);
         self.is_main_menu_open = false;
         self.is_subtitle_menu_open = false;
+        self.is_live_capture_menu_open = false;
         self.is_settings_modal_open = false;
+        self.open_settings_selector = None;
         self.subtitle_menu_anchor = None;
         self.open_context_menu_section = None;
         cx.notify();
@@ -1405,7 +1932,9 @@ impl OledVlcPlayer {
         self.are_controls_visible = false;
         self.is_main_menu_open = false;
         self.is_subtitle_menu_open = false;
+        self.is_live_capture_menu_open = false;
         self.is_settings_modal_open = false;
+        self.open_settings_selector = None;
         self.library_context_menu_anchor = None;
         self.library_context_menu_media_path = None;
         self.open_context_menu_section = None;
@@ -1456,6 +1985,7 @@ impl OledVlcPlayer {
     fn open_file_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.is_main_menu_open = false;
         self.is_subtitle_menu_open = false;
+        self.is_live_capture_menu_open = false;
         self.open_context_menu_section = None;
         self.reveal_controls(window, cx);
         let Some(media_path) = video_file_dialog("Play file").pick_file() else {
@@ -1471,6 +2001,7 @@ impl OledVlcPlayer {
     fn open_folder_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.is_main_menu_open = false;
         self.is_subtitle_menu_open = false;
+        self.is_live_capture_menu_open = false;
         self.open_context_menu_section = None;
         self.reveal_controls(window, cx);
         let path_selection = cx.prompt_for_paths(PathPromptOptions {
@@ -1501,6 +2032,7 @@ impl OledVlcPlayer {
     fn open_queue_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.is_main_menu_open = false;
         self.is_subtitle_menu_open = false;
+        self.is_live_capture_menu_open = false;
         self.open_context_menu_section = None;
         self.reveal_controls(window, cx);
         let path_selection = cx.prompt_for_paths(PathPromptOptions {
@@ -1526,6 +2058,172 @@ impl OledVlcPlayer {
             });
         })
         .detach();
+    }
+
+    fn toggle_live_capture_device_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.is_live_capture_menu_open = !self.is_live_capture_menu_open;
+        self.is_main_menu_open = false;
+        self.is_subtitle_menu_open = false;
+        self.is_settings_modal_open = false;
+        self.open_settings_selector = None;
+        self.library_context_menu_anchor = None;
+        self.library_context_menu_media_path = None;
+        self.open_context_menu_section = None;
+
+        if self.is_live_capture_menu_open && self.live_capture_devices.is_empty() {
+            self.refresh_live_capture_devices(window, cx);
+        }
+
+        cx.notify();
+    }
+
+    fn refresh_live_capture_devices(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_live_capture_scan_pending {
+            return;
+        }
+
+        let Some(ffmpeg_path) = self.dependency_status.ffmpeg_path.clone() else {
+            self.status_message = Some("FFmpeg is required to list live capture devices.".into());
+            self.is_live_capture_menu_open = true;
+            cx.notify();
+            return;
+        };
+
+        self.is_live_capture_scan_pending = true;
+        self.status_message = Some("Scanning live capture devices...".into());
+        cx.notify();
+
+        cx.spawn_in(window, async move |this, cx| {
+            let device_scan_result = list_live_capture_devices(&ffmpeg_path);
+
+            let _ = this.update_in(cx, |player, _window, cx| {
+                player.is_live_capture_scan_pending = false;
+                match device_scan_result {
+                    Ok(device_scan) => {
+                        let device_count = device_scan.video_devices.len();
+                        let audio_device_count = device_scan.audio_devices.len();
+                        player.live_capture_devices = device_scan.video_devices;
+                        player.live_capture_audio_devices = device_scan.audio_devices;
+                        player.status_message = Some(
+                            if device_count == 0 {
+                                "No live capture devices were found.".to_string()
+                            } else {
+                                format!(
+                                    "Found {device_count} live capture device(s) and {audio_device_count} audio source(s)."
+                                )
+                            }
+                            .into(),
+                        );
+                    }
+                    Err(error_message) => {
+                        player.live_capture_devices.clear();
+                        player.live_capture_audio_devices.clear();
+                        player.status_message = Some(error_message.into());
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn load_live_capture_device(
+        &mut self,
+        device: LiveCaptureDevice,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let device = self.live_capture_device_with_selected_audio_source(device);
+        self.pending_watch_session = None;
+        clear_saved_watch_session();
+        self.record_current_media_progress();
+        self.stop_playback_process();
+        self.playback_queue = vec![build_live_capture_media(device)];
+        self.current_queue_index = Some(0);
+        self.selected_audio_track_id = None;
+        self.selected_subtitle_path = None;
+        self.selected_embedded_subtitle_track_id = None;
+        self.playback_position_seconds = 0.0;
+        self.is_eof_reached = false;
+        self.is_library_open = false;
+        self.is_live_capture_menu_open = false;
+        self.start_current_media_playback(window, cx);
+        self.reveal_controls(window, cx);
+    }
+
+    fn live_capture_device_with_selected_audio_source(
+        &self,
+        mut device: LiveCaptureDevice,
+    ) -> LiveCaptureDevice {
+        match self.settings.live_capture_audio_source.as_str() {
+            LIVE_CAPTURE_AUDIO_SOURCE_NONE => {
+                device.audio_backend_name = None;
+                device.audio_pin_name = None;
+            }
+            LIVE_CAPTURE_AUDIO_SOURCE_AUTO => {}
+            selected_audio_backend_name => {
+                device.audio_backend_name = Some(selected_audio_backend_name.to_string());
+                device.audio_pin_name = None;
+            }
+        }
+
+        device
+    }
+
+    fn set_live_capture_audio_source(
+        &mut self,
+        audio_source: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.live_capture_audio_source = audio_source;
+        save_player_settings(&self.settings);
+        self.status_message = Some(
+            format!(
+                "Live capture audio source: {}",
+                self.live_capture_audio_source_label()
+            )
+            .into(),
+        );
+
+        if self.is_current_media_live_capture() {
+            self.restart_current_live_capture_with_current_settings(window, cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    fn live_capture_audio_source_label(&self) -> String {
+        live_capture_audio_source_label(
+            &self.settings.live_capture_audio_source,
+            &self.live_capture_audio_devices,
+        )
+    }
+
+    fn restart_current_live_capture_with_current_settings(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(current_queue_index) = self.current_queue_index else {
+            return;
+        };
+        let Some(current_device) = self
+            .playback_queue
+            .get(current_queue_index)
+            .and_then(LoadedMedia::live_capture_device)
+            .cloned()
+        else {
+            return;
+        };
+        let updated_device = self.live_capture_device_with_selected_audio_source(
+            current_device.with_latency_mode(LiveCaptureLatencyMode::UltraLow),
+        );
+
+        if let Some(current_media) = self.playback_queue.get_mut(current_queue_index) {
+            current_media.source = LoadedMediaSource::LiveCapture(updated_device);
+        }
+        self.start_current_media_playback(window, cx);
     }
 
     fn load_media_paths(
@@ -1561,6 +2259,7 @@ impl OledVlcPlayer {
         self.current_queue_index = Some(0);
         self.select_initial_tracks_for_queue_index(0);
         self.is_library_open = false;
+        self.is_live_capture_menu_open = false;
         self.remember_current_queue_in_library();
         self.start_current_media_playback(window, cx);
     }
@@ -1612,7 +2311,11 @@ impl OledVlcPlayer {
         let resume_queue_index = self
             .playback_queue
             .iter()
-            .position(|media| media.path == watch_session.current_media_path)
+            .position(|media| {
+                media
+                    .file_path()
+                    .is_some_and(|path| path == watch_session.current_media_path)
+            })
             .unwrap_or(fallback_queue_index);
 
         self.current_queue_index = Some(resume_queue_index);
@@ -1620,6 +2323,7 @@ impl OledVlcPlayer {
         self.is_muted = watch_session.is_muted;
         self.select_initial_tracks_for_queue_index(resume_queue_index);
         self.is_library_open = false;
+        self.is_live_capture_menu_open = false;
         self.remember_current_queue_in_library();
         self.start_current_media_playback_at_position(
             watch_session.playback_position_seconds,
@@ -1864,7 +2568,7 @@ impl OledVlcPlayer {
         self.stop_playback_process();
         self.playback_progress_generation += 1;
 
-        let Some(media_path) = self.current_media_path() else {
+        let Some(current_media) = self.current_media().cloned() else {
             self.playback_position_seconds = 0.0;
             self.is_playing = false;
             self.status_message = Some("No media is selected.".into());
@@ -1881,10 +2585,13 @@ impl OledVlcPlayer {
             return;
         };
 
-        let clamped_start_position_seconds = self
-            .current_media_duration_seconds()
-            .map(|duration_seconds| start_position_seconds.clamp(0.0, duration_seconds))
-            .unwrap_or_else(|| start_position_seconds.max(0.0));
+        let clamped_start_position_seconds = if current_media.is_seekable_file() {
+            self.current_media_duration_seconds()
+                .map(|duration_seconds| start_position_seconds.clamp(0.0, duration_seconds))
+                .unwrap_or_else(|| start_position_seconds.max(0.0))
+        } else {
+            0.0
+        };
         self.playback_position_seconds = clamped_start_position_seconds;
         self.is_eof_reached = false;
 
@@ -1896,63 +2603,52 @@ impl OledVlcPlayer {
         };
 
         let ipc_path = create_playback_ipc_path();
+        let log_path = create_playback_log_path();
         self.position_video_host_for_current_window(window, true);
 
         let mut command = Command::new(mpv_path);
         command
             .arg(format!("--wid={video_host_window_id}"))
             .arg(format!("--input-ipc-server={ipc_path}"))
+            .arg(format!("--log-file={}", log_path.display()))
             .arg("--force-window=yes")
             .arg("--no-border")
             .arg("--no-osc")
             .arg("--keep-open=yes")
+            .arg("--show-in-taskbar=no")
+            .arg("--taskbar-progress=no")
+            .arg("--title=Watch Playback Backend")
             .arg("--no-terminal")
             .arg("--really-quiet")
             .arg(format!("--hwdec={}", self.settings.hardware_decoding_mode))
+            .arg(format!(
+                "--audio-device={}",
+                self.settings.audio_output_device
+            ))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         hide_child_process_window(&mut command);
 
-        if clamped_start_position_seconds > 0.0 {
+        if current_media.is_seekable_file() && clamped_start_position_seconds > 0.0 {
             command.arg(format!("--start={clamped_start_position_seconds:.3}"));
         }
-        command.arg(media_path.as_os_str());
+        current_media.append_mpv_input_args(&mut command, &self.settings);
 
         match command.spawn() {
             Ok(child) => {
                 self.playback_process = Some(child);
                 self.playback_ipc_path = Some(ipc_path);
+                self.playback_log_path = Some(log_path);
                 self.is_playing = true;
                 self.status_message = None;
-                if !self.send_mpv_command(json!(["set_property", "volume", self.volume_percent])) {
-                    self.status_message =
-                        Some("Playback started, but mpv controls are not connected yet.".into());
-                }
-                self.send_mpv_command(json!(["set_property", "mute", self.is_muted]));
-                if let Some(audio_track_id) = self.selected_audio_track_id {
-                    self.send_mpv_command(json!(["set_property", "aid", audio_track_id]));
-                }
-                self.load_selected_subtitle_in_backend();
-                self.apply_subtitle_style_in_backend();
-                self.send_mpv_command(json!([
-                    "set_property",
-                    "sub-delay",
-                    self.subtitle_delay_ms as f64 / 1000.0
-                ]));
-                self.send_mpv_command(json!(["set_property", "speed", self.playback_speed]));
-                if clamped_start_position_seconds > 0.0 {
-                    self.send_mpv_command(json!([
-                        "seek",
-                        clamped_start_position_seconds,
-                        "absolute+exact"
-                    ]));
-                }
+                self.configure_playback_backend_after_start(clamped_start_position_seconds);
                 self.schedule_playback_state_poll(window, cx);
             }
             Err(error) => {
                 self.playback_process = None;
                 self.playback_ipc_path = None;
+                self.playback_log_path = None;
                 self.is_playing = false;
                 self.status_message =
                     Some(format!("Could not start mpv playback backend: {error}").into());
@@ -2009,6 +2705,7 @@ impl OledVlcPlayer {
             set_embedded_video_host_visible(video_host_window_id, false);
         }
         self.playback_ipc_path = None;
+        self.playback_log_path = None;
     }
 
     fn send_mpv_command(&self, command: Value) -> bool {
@@ -2034,6 +2731,62 @@ impl OledVlcPlayer {
             subtitle_path.display().to_string(),
             "select"
         ]));
+    }
+
+    fn configure_playback_backend_after_start(&self, start_position_seconds: f64) {
+        let Some(ipc_path) = self.playback_ipc_path.clone() else {
+            return;
+        };
+        let volume_percent = self.volume_percent;
+        let is_muted = self.is_muted;
+        let selected_audio_track_id = self.selected_audio_track_id;
+        let selected_embedded_subtitle_track_id = self.selected_embedded_subtitle_track_id;
+        let selected_subtitle_path = self.selected_subtitle_path.clone();
+        let subtitle_font_size = self.settings.subtitle_font_size;
+        let subtitle_color = self.settings.subtitle_color.clone();
+        let subtitle_position_percent = self.settings.subtitle_position_percent;
+        let subtitle_delay_seconds = self.subtitle_delay_ms as f64 / 1000.0;
+        let playback_speed = self.playback_speed;
+
+        let _ = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(80));
+            send_mpv_ipc_command(&ipc_path, json!(["set_property", "volume", volume_percent]));
+            send_mpv_ipc_command(&ipc_path, json!(["set_property", "mute", is_muted]));
+            if let Some(audio_track_id) = selected_audio_track_id {
+                send_mpv_ipc_command(&ipc_path, json!(["set_property", "aid", audio_track_id]));
+            }
+            if let Some(track_id) = selected_embedded_subtitle_track_id {
+                send_mpv_ipc_command(&ipc_path, json!(["set_property", "sid", track_id]));
+            } else if let Some(subtitle_path) = selected_subtitle_path {
+                send_mpv_ipc_command(
+                    &ipc_path,
+                    json!(["sub-add", subtitle_path.display().to_string(), "select"]),
+                );
+            }
+            send_mpv_ipc_command(
+                &ipc_path,
+                json!(["set_property", "sub-font-size", subtitle_font_size]),
+            );
+            send_mpv_ipc_command(
+                &ipc_path,
+                json!(["set_property", "sub-color", subtitle_color]),
+            );
+            send_mpv_ipc_command(
+                &ipc_path,
+                json!(["set_property", "sub-pos", subtitle_position_percent]),
+            );
+            send_mpv_ipc_command(
+                &ipc_path,
+                json!(["set_property", "sub-delay", subtitle_delay_seconds]),
+            );
+            send_mpv_ipc_command(&ipc_path, json!(["set_property", "speed", playback_speed]));
+            if start_position_seconds > 0.0 {
+                send_mpv_ipc_command(
+                    &ipc_path,
+                    json!(["seek", start_position_seconds, "absolute+exact"]),
+                );
+            }
+        });
     }
 
     fn apply_subtitle_style_in_backend(&self) {
@@ -2173,8 +2926,90 @@ impl OledVlcPlayer {
         cx.notify();
     }
 
-    fn cycle_resume_behavior_setting(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.settings.resume_behavior = self.settings.resume_behavior.next();
+    fn open_settings_selector(
+        &mut self,
+        selector_kind: SettingsSelectorKind,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_settings_selector = Some(selector_kind);
+        cx.notify();
+    }
+
+    fn close_settings_selector(&mut self, cx: &mut Context<Self>) {
+        self.open_settings_selector = None;
+        cx.notify();
+    }
+
+    fn apply_settings_selector_choice(
+        &mut self,
+        selector_choice: SettingsSelectorChoice,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_settings_selector = None;
+
+        match selector_choice {
+            SettingsSelectorChoice::AudioOutputDevice(audio_output_device) => {
+                self.set_audio_output_device(audio_output_device, window, cx);
+            }
+            SettingsSelectorChoice::ResumeBehavior(resume_behavior) => {
+                self.set_resume_behavior_setting(resume_behavior, window, cx);
+            }
+            SettingsSelectorChoice::PreferredAudioLanguage(preferred_audio_language) => {
+                self.set_preferred_audio_language_setting(preferred_audio_language, window, cx);
+            }
+            SettingsSelectorChoice::PreferredSubtitleLanguage(preferred_subtitle_language) => {
+                self.set_preferred_subtitle_language_setting(
+                    preferred_subtitle_language,
+                    window,
+                    cx,
+                );
+            }
+            SettingsSelectorChoice::HardwareDecodingMode(hardware_decoding_mode) => {
+                self.set_hardware_decoding_setting(hardware_decoding_mode, window, cx);
+            }
+            SettingsSelectorChoice::StartFullscreen(is_enabled) => {
+                self.set_start_fullscreen_setting(is_enabled, window, cx);
+            }
+            SettingsSelectorChoice::LiveLowestLatency(is_enabled) => {
+                self.set_lowest_latency_live_capture_setting(is_enabled, window, cx);
+            }
+            SettingsSelectorChoice::LiveCaptureExclusiveAudio(is_enabled) => {
+                self.set_live_capture_exclusive_audio_setting(is_enabled, window, cx);
+            }
+            SettingsSelectorChoice::BackdropBlur(is_enabled) => {
+                self.set_backdrop_blur_setting(is_enabled, window, cx);
+            }
+        }
+    }
+
+    fn set_audio_output_device(
+        &mut self,
+        audio_output_device: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.audio_output_device = audio_output_device.clone();
+        save_player_settings(&self.settings);
+        self.send_mpv_command(json!(["set_property", "audio-device", audio_output_device]));
+        self.open_settings_selector = None;
+        self.save_settings_and_show(
+            format!(
+                "Audio output {}",
+                audio_output_device_label(&self.settings.audio_output_device)
+            ),
+            window,
+            cx,
+        );
+    }
+
+    fn set_resume_behavior_setting(
+        &mut self,
+        resume_behavior: ResumeBehavior,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.resume_behavior = resume_behavior;
         if self.settings.resume_behavior == ResumeBehavior::Never {
             self.pending_watch_session = None;
             clear_saved_watch_session();
@@ -2186,9 +3021,13 @@ impl OledVlcPlayer {
         );
     }
 
-    fn cycle_audio_language_setting(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.settings.preferred_audio_language =
-            next_language_preference(&self.settings.preferred_audio_language);
+    fn set_preferred_audio_language_setting(
+        &mut self,
+        preferred_audio_language: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.preferred_audio_language = preferred_audio_language;
         self.save_settings_and_show(
             format!("Audio language {}", self.settings.preferred_audio_language),
             window,
@@ -2196,9 +3035,13 @@ impl OledVlcPlayer {
         );
     }
 
-    fn cycle_subtitle_language_setting(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.settings.preferred_subtitle_language =
-            next_language_preference(&self.settings.preferred_subtitle_language);
+    fn set_preferred_subtitle_language_setting(
+        &mut self,
+        preferred_subtitle_language: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.preferred_subtitle_language = preferred_subtitle_language;
         self.save_settings_and_show(
             format!(
                 "Subtitle language {}",
@@ -2209,12 +3052,13 @@ impl OledVlcPlayer {
         );
     }
 
-    fn cycle_hardware_decoding_setting(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.settings.hardware_decoding_mode = match self.settings.hardware_decoding_mode.as_str() {
-            "auto-safe" => "d3d11va".to_string(),
-            "d3d11va" => "no".to_string(),
-            _ => "auto-safe".to_string(),
-        };
+    fn set_hardware_decoding_setting(
+        &mut self,
+        hardware_decoding_mode: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.hardware_decoding_mode = hardware_decoding_mode;
         self.save_settings_and_show(
             format!("Hardware decode {}", self.settings.hardware_decoding_mode),
             window,
@@ -2222,15 +3066,74 @@ impl OledVlcPlayer {
         );
     }
 
-    fn toggle_start_fullscreen_setting(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.settings.start_fullscreen = !self.settings.start_fullscreen;
+    fn set_start_fullscreen_setting(
+        &mut self,
+        is_enabled: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.start_fullscreen = is_enabled;
         self.save_settings_and_show(
-            if self.settings.start_fullscreen {
-                "Start fullscreen on"
-            } else {
-                "Start fullscreen off"
-            }
-            .to_string(),
+            format!("Start fullscreen {}", on_off_message_word(is_enabled)),
+            window,
+            cx,
+        );
+    }
+
+    fn set_lowest_latency_live_capture_setting(
+        &mut self,
+        is_enabled: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.is_lowest_latency_live_capture_enabled = is_enabled;
+
+        if self.is_current_media_live_capture() {
+            self.restart_current_live_capture_with_current_settings(window, cx);
+        }
+
+        self.save_settings_and_show(
+            format!(
+                "Live capture lowest latency {}",
+                on_off_message_word(is_enabled)
+            ),
+            window,
+            cx,
+        );
+    }
+
+    fn set_live_capture_exclusive_audio_setting(
+        &mut self,
+        is_enabled: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.is_live_capture_exclusive_audio_enabled = is_enabled;
+
+        if self.is_current_media_live_capture() {
+            self.restart_current_live_capture_with_current_settings(window, cx);
+        }
+
+        self.save_settings_and_show(
+            format!(
+                "Live capture exclusive audio {}",
+                on_off_message_word(is_enabled)
+            ),
+            window,
+            cx,
+        );
+    }
+
+    fn set_backdrop_blur_setting(
+        &mut self,
+        is_enabled: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.is_backdrop_blur_enabled = is_enabled;
+        window.set_background_appearance(self.settings.window_background_appearance());
+        self.save_settings_and_show(
+            format!("Backdrop blur {}", on_off_message_word(is_enabled)),
             window,
             cx,
         );
@@ -2244,6 +3147,8 @@ impl OledVlcPlayer {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let is_video_surface_active = self.is_video_surface_active();
+        let should_show_blurred_library_backdrop =
+            self.settings.is_backdrop_blur_enabled && self.is_library_surface_visible();
         let should_show_player_overlay = !self.is_library_open;
 
         div()
@@ -2251,15 +3156,23 @@ impl OledVlcPlayer {
             .relative()
             .overflow_hidden()
             .size_full()
-            .bg(if is_video_surface_active {
-                rgb_alpha(PLAYER_BLACK, 0.0)
-            } else {
-                rgb(PLAYER_BLACK)
-            })
+            .bg(
+                if is_video_surface_active || should_show_blurred_library_backdrop {
+                    rgb_alpha(PLAYER_BLACK, 0.0)
+                } else {
+                    self.settings
+                        .surface_background_color(PLAYER_BLACK, BACKDROP_BLUR_VIDEO_SURFACE_ALPHA)
+                },
+            )
             .border_1()
             .border_color(rgb(FINE_BORDER))
             .when(!is_video_surface_active, |surface| {
-                surface.child(self.render_empty_video_plane(viewport_width, viewport_height, cx))
+                surface.child(self.render_empty_video_plane(
+                    is_window_fullscreen,
+                    viewport_width,
+                    viewport_height,
+                    cx,
+                ))
             })
             .child(self.render_embedded_video_host())
             .when(should_show_player_overlay, |surface| {
@@ -2421,17 +3334,19 @@ impl OledVlcPlayer {
 
     fn render_empty_video_plane(
         &self,
+        is_window_fullscreen: bool,
         viewport_width: f32,
         viewport_height: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if self.is_library_open || self.current_media().is_none() {
             return self
-                .render_library_mode(viewport_width, viewport_height, cx)
+                .render_library_mode(is_window_fullscreen, viewport_width, viewport_height, cx)
                 .into_any_element();
         }
 
         div()
+            .id("top-player-overlay")
             .absolute()
             .top_0()
             .left_0()
@@ -2440,7 +3355,9 @@ impl OledVlcPlayer {
             .flex()
             .items_center()
             .justify_center()
-            .bg(rgb(0x010101))
+            .bg(self
+                .settings
+                .surface_background_color(OLED_BLACK, BACKDROP_BLUR_BASE_BACKGROUND_ALPHA))
             .child(
                 div()
                     .flex()
@@ -2464,11 +3381,13 @@ impl OledVlcPlayer {
 
     fn render_library_mode(
         &self,
+        is_window_fullscreen: bool,
         viewport_width: f32,
         viewport_height: f32,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let content_width = (viewport_width - 64.0).clamp(320.0, 1360.0);
+        let library_scale = library_ui_scale(viewport_width, viewport_height);
+        let content_width = library_content_width(viewport_width, library_scale);
         let shelves = self.library_shelves();
         let has_library_shelves = !shelves.is_empty();
 
@@ -2479,10 +3398,12 @@ impl OledVlcPlayer {
             .left_0()
             .right_0()
             .bottom_0()
-            .p_8()
-            .bg(rgb(0x010101))
+            .p(px(32.0 * library_scale))
+            .bg(self
+                .settings
+                .surface_background_color(OLED_BLACK, BACKDROP_BLUR_LIBRARY_BACKGROUND_ALPHA))
             .overflow_y_scroll()
-            .scrollbar_width(px(6.0))
+            .scrollbar_width(px((6.0 * library_scale).clamp(6.0, 12.0)))
             .text_color(rgb(SOFT_WHITE))
             .flex()
             .flex_col()
@@ -2492,33 +3413,46 @@ impl OledVlcPlayer {
                     .w(px(content_width))
                     .flex()
                     .flex_col()
-                    .gap_6()
+                    .gap(px(24.0 * library_scale))
                     .child(
                         div()
                             .flex()
                             .items_end()
                             .justify_between()
-                            .gap_4()
+                            .gap(px(16.0 * library_scale))
                             .child(
                                 div()
                                     .flex()
                                     .flex_col()
-                                    .gap_1()
-                                    .child(div().text_lg().child("Library"))
-                                    .child(div().text_xs().text_color(rgb(MUTED_TEXT)).child(
-                                        self.status_message.clone().unwrap_or_else(|| {
-                                            "Recent media, quick resume, and series.".into()
-                                        }),
-                                    )),
+                                    .gap(px(4.0 * library_scale))
+                                    .child(
+                                        div()
+                                            .text_size(px(18.0 * library_scale))
+                                            .line_height(px(24.0 * library_scale))
+                                            .child("Library"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(12.0 * library_scale))
+                                            .line_height(px(16.0 * library_scale))
+                                            .text_color(rgb(MUTED_TEXT))
+                                            .child(self.status_message.clone().unwrap_or_else(
+                                                || "Recent media, quick resume, and series.".into(),
+                                            )),
+                                    ),
                             )
                             .child(
                                 div()
                                     .flex()
-                                    .gap_2()
+                                    .gap(px(8.0 * library_scale))
+                                    .child(
+                                        self.render_live_capture_device_dropdown(library_scale, cx),
+                                    )
                                     .child(prompt_action_button(
                                         "library-open-file",
                                         "Open File",
                                         false,
+                                        library_scale,
                                         cx,
                                         |player, window, cx| {
                                             player.open_file_picker(window, cx);
@@ -2528,6 +3462,7 @@ impl OledVlcPlayer {
                                         "library-open-folder",
                                         "Open Folder",
                                         true,
+                                        library_scale,
                                         cx,
                                         |player, window, cx| {
                                             player.open_folder_picker(window, cx);
@@ -2535,11 +3470,9 @@ impl OledVlcPlayer {
                                     )),
                             ),
                     )
-                    .children(
-                        shelves.into_iter().map(|shelf| {
-                            self.render_library_shelf_section(shelf, viewport_width, cx)
-                        }),
-                    )
+                    .children(shelves.into_iter().map(|shelf| {
+                        self.render_library_shelf_section(shelf, viewport_width, library_scale, cx)
+                    }))
                     .when(!has_library_shelves, |panel| {
                         panel.child(empty_menu_message("Open media to build your library."))
                     }),
@@ -2550,39 +3483,365 @@ impl OledVlcPlayer {
             .when(self.library_context_menu_media_path.is_some(), |plane| {
                 plane.child(self.render_library_context_menu(viewport_width, viewport_height, cx))
             })
-            .child(self.render_library_settings_button(cx))
+            .child(self.render_library_fullscreen_button(is_window_fullscreen, library_scale, cx))
+            .child(self.render_library_settings_button(library_scale, cx))
     }
 
-    fn render_library_settings_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_live_capture_device_dropdown(
+        &self,
+        library_scale: f32,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let is_menu_open = self.is_live_capture_menu_open;
+        let is_scan_pending = self.is_live_capture_scan_pending;
+        let dropdown_width = 360.0 * library_scale;
+
         div()
-            .id("library-settings-button")
+            .id("library-live-capture")
+            .relative()
+            .child(prompt_action_button(
+                "library-live-capture-button",
+                "Live Capture",
+                false,
+                library_scale,
+                cx,
+                |player, window, cx| {
+                    player.toggle_live_capture_device_menu(window, cx);
+                },
+            ))
+            .when(is_menu_open, |container| {
+                container.child(
+                    div()
+                        .id("library-live-capture-menu")
+                        .absolute()
+                        .top(px(42.0 * library_scale))
+                        .left_0()
+                        .w(px(dropdown_width))
+                        .max_h(px(320.0 * library_scale))
+                        .overflow_y_scroll()
+                        .scrollbar_width(px((4.0 * library_scale).clamp(4.0, 10.0)))
+                        .p(px(8.0 * library_scale))
+                        .bg(self.settings.surface_background_color(
+                            MENU_BLACK,
+                            BACKDROP_BLUR_MENU_BACKGROUND_ALPHA,
+                        ))
+                        .border_1()
+                        .border_color(rgb(BRIGHT_BORDER))
+                        .shadow_lg()
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.0 * library_scale))
+                        .child(self.render_live_capture_refresh_row(library_scale, cx))
+                        .child(self.render_live_capture_audio_source_section(library_scale, cx))
+                        .when(is_scan_pending, |menu| {
+                            menu.child(scaled_menu_message(
+                                "Scanning capture devices...",
+                                library_scale,
+                            ))
+                        })
+                        .when(
+                            !is_scan_pending && self.live_capture_devices.is_empty(),
+                            |menu| {
+                                menu.child(scaled_menu_message(
+                                    "No capture devices found.",
+                                    library_scale,
+                                ))
+                            },
+                        )
+                        .children(self.live_capture_devices.iter().cloned().map(|device| {
+                            self.render_live_capture_device_row(device, library_scale, cx)
+                        })),
+                )
+            })
+    }
+
+    fn render_live_capture_refresh_row(
+        &self,
+        library_scale: f32,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let is_scan_pending = self.is_live_capture_scan_pending;
+
+        div()
+            .id("library-live-capture-refresh")
+            .px(px(8.0 * library_scale))
+            .py(px(6.0 * library_scale))
+            .text_size(px(12.0 * library_scale))
+            .line_height(px(16.0 * library_scale))
+            .text_color(rgb(MUTED_TEXT))
+            .cursor_pointer()
+            .hover(|row| row.bg(rgb(0x121212)))
+            .on_click(cx.listener(|player, _, window, cx| {
+                player.refresh_live_capture_devices(window, cx);
+                cx.stop_propagation();
+            }))
+            .child(if is_scan_pending {
+                "Refreshing..."
+            } else {
+                "Refresh devices"
+            })
+    }
+
+    fn render_live_capture_audio_source_section(
+        &self,
+        library_scale: f32,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .id("library-live-capture-audio-source-section")
+            .flex()
+            .flex_col()
+            .gap(px(3.0 * library_scale))
+            .pt(px(6.0 * library_scale))
+            .pb(px(6.0 * library_scale))
+            .border_b_1()
+            .border_color(rgb(FINE_BORDER))
+            .child(
+                div()
+                    .px(px(8.0 * library_scale))
+                    .text_size(px(11.0 * library_scale))
+                    .line_height(px(14.0 * library_scale))
+                    .text_color(rgb(MUTED_TEXT))
+                    .child("Audio source"),
+            )
+            .child(self.render_live_capture_audio_source_row(
+                LIVE_CAPTURE_AUDIO_SOURCE_AUTO.to_string(),
+                "Auto",
+                "Use best matching source".to_string(),
+                library_scale,
+                cx,
+            ))
+            .child(self.render_live_capture_audio_source_row(
+                LIVE_CAPTURE_AUDIO_SOURCE_NONE.to_string(),
+                "Video only",
+                "No captured audio".to_string(),
+                library_scale,
+                cx,
+            ))
+            .children(
+                self.live_capture_audio_devices
+                    .iter()
+                    .cloned()
+                    .map(|audio_device| {
+                        self.render_live_capture_audio_device_source_row(
+                            audio_device,
+                            library_scale,
+                            cx,
+                        )
+                    }),
+            )
+    }
+
+    fn render_live_capture_audio_device_source_row(
+        &self,
+        audio_device: LiveCaptureAudioDevice,
+        library_scale: f32,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        self.render_live_capture_audio_source_row(
+            audio_device.backend_name,
+            audio_device.display_name,
+            "DirectShow audio source".to_string(),
+            library_scale,
+            cx,
+        )
+    }
+
+    fn render_live_capture_audio_source_row(
+        &self,
+        audio_source: String,
+        title: impl Into<SharedString>,
+        detail: String,
+        library_scale: f32,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let is_selected = self.settings.live_capture_audio_source == audio_source;
+        let audio_source_id = library_safe_element_key(&audio_source);
+
+        div()
+            .id(format!(
+                "library-live-capture-audio-source-{audio_source_id}"
+            ))
+            .flex()
+            .flex_col()
+            .gap(px(2.0 * library_scale))
+            .px(px(8.0 * library_scale))
+            .py(px(5.0 * library_scale))
+            .bg(if is_selected {
+                rgb_alpha(VLC_ORANGE, 0.10)
+            } else {
+                rgb_alpha(OLED_BLACK, 0.0)
+            })
+            .cursor_pointer()
+            .hover(|row| row.bg(rgb(0x121212)))
+            .on_click(cx.listener(move |player, _, window, cx| {
+                player.set_live_capture_audio_source(audio_source.clone(), window, cx);
+                cx.stop_propagation();
+            }))
+            .child(
+                div()
+                    .text_size(px(12.0 * library_scale))
+                    .line_height(px(16.0 * library_scale))
+                    .truncate()
+                    .child(title.into()),
+            )
+            .child(
+                div()
+                    .text_size(px(10.0 * library_scale))
+                    .line_height(px(13.0 * library_scale))
+                    .text_color(rgb(MUTED_TEXT))
+                    .truncate()
+                    .child(if is_selected {
+                        "selected".to_string()
+                    } else {
+                        detail
+                    }),
+            )
+    }
+
+    fn render_live_capture_device_row(
+        &self,
+        device: LiveCaptureDevice,
+        library_scale: f32,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let launch_device = self.live_capture_device_with_selected_audio_source(device);
+        let device_id = library_safe_element_key(&launch_device.backend_name);
+        let device_for_click = launch_device.clone();
+        let device_display_name = launch_device.display_name.clone();
+        let device_detail = launch_device.detail_label();
+
+        div()
+            .id(format!("library-live-capture-device-{device_id}"))
+            .flex()
+            .flex_col()
+            .gap(px(2.0 * library_scale))
+            .px(px(8.0 * library_scale))
+            .py(px(7.0 * library_scale))
+            .cursor_pointer()
+            .hover(|row| row.bg(rgb(0x121212)))
+            .on_click(cx.listener(move |player, _, window, cx| {
+                player.load_live_capture_device(device_for_click.clone(), window, cx);
+                cx.stop_propagation();
+            }))
+            .child(
+                div()
+                    .text_size(px(13.0 * library_scale))
+                    .line_height(px(17.0 * library_scale))
+                    .truncate()
+                    .child(device_display_name),
+            )
+            .child(
+                div()
+                    .text_size(px(11.0 * library_scale))
+                    .line_height(px(14.0 * library_scale))
+                    .text_color(rgb(MUTED_TEXT))
+                    .truncate()
+                    .child(device_detail),
+            )
+    }
+
+    fn render_library_fullscreen_button(
+        &self,
+        is_window_fullscreen: bool,
+        library_scale: f32,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let fullscreen_icon_key = "library-fullscreen";
+        let is_fullscreen_icon_hovered =
+            self.hovered_library_icon_key.as_deref() == Some(fullscreen_icon_key);
+        let is_fullscreen_icon_exiting =
+            self.exiting_library_icon_key.as_deref() == Some(fullscreen_icon_key);
+        let library_icon_scale_animation_generation = self.library_icon_scale_animation_generation;
+        let fullscreen_icon_path = if is_window_fullscreen {
+            ICON_MINIMIZE
+        } else {
+            ICON_MAXIMIZE
+        };
+        let tooltip_text = if is_window_fullscreen {
+            "Exit fullscreen"
+        } else {
+            "Enter fullscreen"
+        };
+
+        div()
+            .id("library-fullscreen-button")
             .absolute()
-            .right(px(28.0))
-            .bottom(px(28.0))
-            .w(px(48.0))
-            .h(px(48.0))
+            .right(px(76.0 * library_scale))
+            .bottom(px(28.0 * library_scale))
+            .w(px(48.0 * library_scale))
+            .h(px(48.0 * library_scale))
             .flex()
             .items_center()
             .justify_center()
-            .bg(rgb_alpha(OLED_BLACK, 0.82))
-            .border_1()
-            .border_color(rgb(BRIGHT_BORDER))
-            .shadow_lg()
             .text_color(rgb(SOFT_WHITE))
             .cursor_pointer()
-            .hover(|button| button.bg(rgb_alpha(MENU_BLACK, 0.96)))
             .active(|button| button.opacity(0.78))
+            .on_hover(cx.listener(move |player, is_hovered: &bool, _window, cx| {
+                player.update_library_icon_hover(fullscreen_icon_key.to_string(), *is_hovered, cx);
+            }))
+            .on_click(cx.listener(|player, _, window, cx| {
+                player.toggle_window_fullscreen(window, cx);
+                cx.stop_propagation();
+            }))
+            .child(render_scaled_library_icon(
+                fullscreen_icon_path,
+                fullscreen_icon_key,
+                21.0 * library_scale,
+                21.0 * library_scale,
+                is_fullscreen_icon_hovered,
+                is_fullscreen_icon_exiting,
+                library_icon_scale_animation_generation,
+            ))
+            .tooltip(move |_window, cx| {
+                cx.new(|_| TooltipText {
+                    text: tooltip_text.into(),
+                })
+                .into()
+            })
+    }
+
+    fn render_library_settings_button(
+        &self,
+        library_scale: f32,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let settings_icon_key = "library-settings";
+        let is_settings_icon_hovered =
+            self.hovered_library_icon_key.as_deref() == Some(settings_icon_key);
+        let is_settings_icon_exiting =
+            self.exiting_library_icon_key.as_deref() == Some(settings_icon_key);
+        let library_icon_scale_animation_generation = self.library_icon_scale_animation_generation;
+
+        div()
+            .id("library-settings-button")
+            .absolute()
+            .right(px(28.0 * library_scale))
+            .bottom(px(28.0 * library_scale))
+            .w(px(48.0 * library_scale))
+            .h(px(48.0 * library_scale))
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_color(rgb(SOFT_WHITE))
+            .cursor_pointer()
+            .active(|button| button.opacity(0.78))
+            .on_hover(cx.listener(move |player, is_hovered: &bool, _window, cx| {
+                player.update_library_icon_hover(settings_icon_key.to_string(), *is_hovered, cx);
+            }))
             .on_click(cx.listener(|player, _, window, cx| {
                 player.open_settings_modal(window, cx);
                 cx.stop_propagation();
             }))
-            .child(
-                svg()
-                    .external_path(crate::icon_path(ICON_SETTINGS))
-                    .w(px(21.0))
-                    .h(px(21.0))
-                    .text_color(rgb(SOFT_WHITE)),
-            )
+            .child(render_scaled_library_icon(
+                ICON_SETTINGS,
+                settings_icon_key,
+                21.0 * library_scale,
+                21.0 * library_scale,
+                is_settings_icon_hovered,
+                is_settings_icon_exiting,
+                library_icon_scale_animation_generation,
+            ))
             .tooltip(move |_window, cx| {
                 cx.new(|_| TooltipText {
                     text: "Settings".into(),
@@ -2592,8 +3851,8 @@ impl OledVlcPlayer {
     }
 
     fn library_shelves(&self) -> Vec<LibraryShelf> {
-        let watched_media_paths = self.watched_media_paths();
-        let series_shelves = series_library_shelves(&self.library, &watched_media_paths);
+        let watched_media_path_keys = self.watched_media_path_keys();
+        let series_shelves = series_library_shelves(&self.library, &watched_media_path_keys);
         let grouped_media_paths = series_shelves
             .iter()
             .flat_map(|shelf| shelf.items.iter().map(|item| item.path.clone()))
@@ -2612,7 +3871,7 @@ impl OledVlcPlayer {
             title: "Recent Media".to_string(),
             subtitle: None,
             empty_message: "No recent media yet.",
-            items: self.recent_media_library_items(&grouped_media_paths, &watched_media_paths),
+            items: self.recent_media_library_items(&grouped_media_paths, &watched_media_path_keys),
         });
         shelves.extend(series_shelves);
         shelves
@@ -2621,12 +3880,12 @@ impl OledVlcPlayer {
             .collect()
     }
 
-    fn watched_media_paths(&self) -> HashSet<PathBuf> {
+    fn watched_media_path_keys(&self) -> HashSet<String> {
         self.library
             .media_history
             .iter()
             .filter(|entry| entry.is_completed)
-            .map(|entry| entry.path.clone())
+            .map(|entry| library_media_path_key(&entry.path))
             .collect()
     }
 
@@ -2656,7 +3915,7 @@ impl OledVlcPlayer {
     fn recent_media_library_items(
         &self,
         grouped_media_paths: &HashSet<PathBuf>,
-        watched_media_paths: &HashSet<PathBuf>,
+        watched_media_path_keys: &HashSet<String>,
     ) -> Vec<LibraryGridItem> {
         self.library
             .recent_media_paths
@@ -2666,7 +3925,7 @@ impl OledVlcPlayer {
             .take(MAX_LIBRARY_ITEMS_PER_SHELF)
             .map(|path| {
                 let mut item = library_item_for_media_path(path, false);
-                item.is_watched = watched_media_paths.contains(path);
+                item.is_watched = watched_media_path_keys.contains(&library_media_path_key(path));
                 item
             })
             .collect()
@@ -2676,10 +3935,11 @@ impl OledVlcPlayer {
         &self,
         shelf: LibraryShelf,
         viewport_width: f32,
+        library_scale: f32,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let visible_card_count = library_visible_card_count(viewport_width);
-        let card_width = library_card_width(viewport_width);
+        let visible_card_count = library_visible_card_count(viewport_width, library_scale);
+        let card_width = library_card_width(viewport_width, library_scale);
         let max_offset = shelf.items.len().saturating_sub(visible_card_count);
         let shelf_offset = self
             .library_shelf_offsets
@@ -2712,14 +3972,14 @@ impl OledVlcPlayer {
         div()
             .flex()
             .flex_col()
-            .gap_3()
+            .gap(px(12.0 * library_scale))
             .child(
                 div()
                     .id(format!("library-shelf-header-{shelf_key}"))
-                    .h(px(34.0))
+                    .h(px(34.0 * library_scale))
                     .flex()
                     .items_center()
-                    .gap_2()
+                    .gap(px(8.0 * library_scale))
                     .cursor_pointer()
                     .on_click(cx.listener(move |player, _, _window, cx| {
                         player.toggle_library_shelf_collapse(collapse_shelf_key.clone(), cx);
@@ -2728,27 +3988,27 @@ impl OledVlcPlayer {
                     .child(
                         svg()
                             .external_path(crate::icon_path(collapse_icon_path))
-                            .w(px(16.0))
-                            .h(px(16.0))
+                            .w(px(16.0 * library_scale))
+                            .h(px(16.0 * library_scale))
                             .text_color(rgb(MUTED_TEXT)),
                     )
                     .child(
                         div()
                             .flex()
                             .flex_col()
-                            .gap_1()
+                            .gap(px(4.0 * library_scale))
                             .child(
                                 div()
-                                    .text_sm()
-                                    .line_height(px(16.0))
+                                    .text_size(px(14.0 * library_scale))
+                                    .line_height(px(16.0 * library_scale))
                                     .text_color(rgb(MUTED_TEXT))
                                     .child(shelf_title.clone()),
                             )
                             .when_some(shelf_subtitle, |label, subtitle| {
                                 label.child(
                                     div()
-                                        .text_xs()
-                                        .line_height(px(12.0))
+                                        .text_size(px(12.0 * library_scale))
+                                        .line_height(px(14.0 * library_scale))
                                         .text_color(rgb(SOFT_WHITE))
                                         .child(subtitle),
                                 )
@@ -2763,22 +4023,27 @@ impl OledVlcPlayer {
                     div()
                         .relative()
                         .overflow_hidden()
-                        .child(div().flex().gap_3().children(visible_items.into_iter().map(
-                            |item| {
-                                self.render_library_grid_card(
-                                    shelf_title.clone(),
-                                    card_width,
-                                    item,
-                                    cx,
-                                )
-                            },
-                        )))
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(LIBRARY_CARD_GAP_PX * library_scale))
+                                .children(visible_items.into_iter().map(|item| {
+                                    self.render_library_grid_card(
+                                        shelf_title.clone(),
+                                        card_width,
+                                        library_scale,
+                                        item,
+                                        cx,
+                                    )
+                                })),
+                        )
                         .when(can_page_left, |row| {
                             row.child(self.render_library_shelf_arrow(
                                 shelf_key.clone(),
                                 item_count,
                                 -1,
                                 viewport_width,
+                                library_scale,
                                 cx,
                             ))
                         })
@@ -2788,6 +4053,7 @@ impl OledVlcPlayer {
                                 item_count,
                                 1,
                                 viewport_width,
+                                library_scale,
                                 cx,
                             ))
                         }),
@@ -2801,6 +4067,7 @@ impl OledVlcPlayer {
         item_count: usize,
         direction: i32,
         viewport_width: f32,
+        library_scale: f32,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let is_left_arrow = direction < 0;
@@ -2809,40 +4076,60 @@ impl OledVlcPlayer {
         } else {
             ICON_CHEVRON_RIGHT
         };
+        let arrow_direction_label = if is_left_arrow { "left" } else { "right" };
+        let arrow_icon_key = format!("library-shelf-arrow-{shelf_key}-{arrow_direction_label}");
+        let arrow_element_id = arrow_icon_key.clone();
+        let arrow_hover_key = arrow_icon_key.clone();
+        let click_shelf_key = shelf_key.clone();
+        let is_arrow_icon_hovered = self.hovered_library_icon_key.as_ref() == Some(&arrow_icon_key);
+        let is_arrow_icon_exiting = self.exiting_library_icon_key.as_ref() == Some(&arrow_icon_key);
+        let library_icon_scale_animation_generation = self.library_icon_scale_animation_generation;
         let mut arrow = div()
-            .id(format!(
-                "library-shelf-arrow-{}-{}",
-                shelf_key,
-                if is_left_arrow { "left" } else { "right" }
-            ))
+            .id(arrow_element_id)
             .absolute()
-            .top(px(34.0))
-            .w(px(40.0))
-            .h(px(72.0))
+            .top(px(34.0 * library_scale))
+            .w(px(40.0 * library_scale))
+            .h(px(72.0 * library_scale))
             .flex()
             .items_center()
             .justify_center()
-            .bg(rgb_alpha(OLED_BLACK, 0.76))
+            .bg(if self.settings.is_backdrop_blur_enabled {
+                rgb_alpha(OLED_BLACK, BACKDROP_BLUR_FLOATING_CONTROL_ALPHA)
+            } else {
+                rgb_alpha(OLED_BLACK, 0.76)
+            })
             .text_color(rgb(SOFT_WHITE))
             .cursor_pointer()
-            .hover(|button| button.bg(rgb_alpha(OLED_BLACK, 0.92)))
+            .hover(|button| {
+                button.bg(if self.settings.is_backdrop_blur_enabled {
+                    rgb_alpha(OLED_BLACK, BACKDROP_BLUR_MENU_BACKGROUND_ALPHA)
+                } else {
+                    rgb_alpha(OLED_BLACK, 0.92)
+                })
+            })
+            .on_hover(cx.listener(move |player, is_hovered: &bool, _window, cx| {
+                player.update_library_icon_hover(arrow_hover_key.clone(), *is_hovered, cx);
+            }))
             .on_click(cx.listener(move |player, _, _window, cx| {
                 player.shift_library_shelf(
-                    shelf_key.clone(),
+                    click_shelf_key.clone(),
                     item_count,
                     direction,
                     viewport_width,
+                    library_scale,
                 );
                 cx.stop_propagation();
                 cx.notify();
             }))
-            .child(
-                svg()
-                    .external_path(crate::icon_path(icon_path))
-                    .w(px(22.0))
-                    .h(px(22.0))
-                    .text_color(rgb(SOFT_WHITE)),
-            );
+            .child(render_scaled_library_icon(
+                icon_path,
+                &arrow_icon_key,
+                22.0 * library_scale,
+                22.0 * library_scale,
+                is_arrow_icon_hovered,
+                is_arrow_icon_exiting,
+                library_icon_scale_animation_generation,
+            ));
 
         arrow = if is_left_arrow {
             arrow.left_0()
@@ -2858,8 +4145,9 @@ impl OledVlcPlayer {
         item_count: usize,
         direction: i32,
         viewport_width: f32,
+        library_scale: f32,
     ) {
-        let visible_card_count = library_visible_card_count(viewport_width);
+        let visible_card_count = library_visible_card_count(viewport_width, library_scale);
         let max_offset = item_count.saturating_sub(visible_card_count);
         let current_offset = self
             .library_shelf_offsets
@@ -2885,32 +4173,94 @@ impl OledVlcPlayer {
         cx.notify();
     }
 
+    fn update_continue_remove_hover(
+        &mut self,
+        media_path: PathBuf,
+        is_hovered: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if is_hovered {
+            if self.hovered_continue_remove_media_path.as_ref() == Some(&media_path) {
+                return;
+            }
+
+            self.hovered_continue_remove_media_path = Some(media_path);
+            self.exiting_continue_remove_media_path = None;
+        } else if self.hovered_continue_remove_media_path.as_ref() == Some(&media_path) {
+            self.hovered_continue_remove_media_path = None;
+            self.exiting_continue_remove_media_path = Some(media_path);
+        } else {
+            return;
+        }
+
+        self.continue_remove_scale_animation_generation = self
+            .continue_remove_scale_animation_generation
+            .wrapping_add(1);
+        cx.notify();
+    }
+
+    fn update_library_icon_hover(
+        &mut self,
+        icon_key: String,
+        is_hovered: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if is_hovered {
+            if self.hovered_library_icon_key.as_ref() == Some(&icon_key) {
+                return;
+            }
+
+            self.hovered_library_icon_key = Some(icon_key);
+            self.exiting_library_icon_key = None;
+        } else if self.hovered_library_icon_key.as_ref() == Some(&icon_key) {
+            self.hovered_library_icon_key = None;
+            self.exiting_library_icon_key = Some(icon_key);
+        } else {
+            return;
+        }
+
+        self.library_icon_scale_animation_generation =
+            self.library_icon_scale_animation_generation.wrapping_add(1);
+        cx.notify();
+    }
+
     fn dismiss_continue_watching_entry(&mut self, media_path: PathBuf, cx: &mut Context<Self>) {
         self.library
             .media_history
             .retain(|entry| entry.path != media_path);
+        if self.hovered_continue_remove_media_path.as_ref() == Some(&media_path) {
+            self.hovered_continue_remove_media_path = None;
+        }
+        if self.exiting_continue_remove_media_path.as_ref() == Some(&media_path) {
+            self.exiting_continue_remove_media_path = None;
+        }
         save_player_library(&self.library);
         self.status_message = Some("Removed from Continue Watching.".into());
         cx.notify();
     }
 
     fn mark_library_media_watched(&mut self, media_path: PathBuf, cx: &mut Context<Self>) {
+        let media_path_key = library_media_path_key(&media_path);
         let duration_seconds = self
             .current_media()
-            .filter(|media| media.path == media_path)
+            .filter(|media| {
+                media
+                    .file_path()
+                    .is_some_and(|path| library_media_path_key(path) == media_path_key)
+            })
             .and_then(|media| media.duration_seconds)
             .or_else(|| {
                 self.library
                     .media_history
                     .iter()
-                    .find(|entry| entry.path == media_path)
+                    .find(|entry| library_media_path_key(&entry.path) == media_path_key)
                     .and_then(|entry| entry.duration_seconds)
             });
         let playback_position_seconds = duration_seconds.unwrap_or(0.0).max(0.0);
 
         self.library
             .media_history
-            .retain(|entry| entry.path != media_path);
+            .retain(|entry| library_media_path_key(&entry.path) != media_path_key);
         self.library.media_history.insert(
             0,
             MediaHistoryEntry {
@@ -2979,7 +4329,10 @@ impl OledVlcPlayer {
             .top(px(menu_top))
             .w(px(LIBRARY_CONTEXT_MENU_WIDTH))
             .p_2()
-            .bg(rgb(MENU_BLACK))
+            .bg(self
+                .settings
+                .surface_background_color(MENU_BLACK, BACKDROP_BLUR_MENU_BACKGROUND_ALPHA))
+            .rounded_sm()
             .border_1()
             .border_color(rgb(BRIGHT_BORDER))
             .shadow_lg()
@@ -3024,24 +4377,32 @@ impl OledVlcPlayer {
         &self,
         section_title: String,
         card_width: f32,
+        library_scale: f32,
         item: LibraryGridItem,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let item_path = item.path.clone();
         let item_path_for_click = item.path.clone();
         let item_path_for_remove = item.path.clone();
+        let item_path_for_remove_hover = item.path.clone();
         let item_path_for_context_menu = item.path.clone();
         let resume_history_entry = item.resume_history_entry.clone();
         let can_remove_from_continue_watching = item.can_remove_from_continue_watching;
+        let is_continue_remove_hovered =
+            self.hovered_continue_remove_media_path.as_ref() == Some(&item.path);
+        let is_continue_remove_exiting =
+            self.exiting_continue_remove_media_path.as_ref() == Some(&item.path);
+        let continue_remove_scale_animation_generation =
+            self.continue_remove_scale_animation_generation;
         let is_watched = item.is_watched;
         let episode_badge = item.episode_badge.clone();
         let has_episode_badge = episode_badge.is_some();
         let item_title = item.title.clone();
         let has_item_title = !item_title.is_empty();
         let title_overlay_width = if has_episode_badge {
-            (card_width - 66.0).max(1.0)
+            (card_width - (66.0 * library_scale)).max(1.0)
         } else {
-            (card_width - 16.0).max(1.0)
+            (card_width - (16.0 * library_scale)).max(1.0)
         };
         let thumbnail_path = item
             .thumbnail_media_path
@@ -3062,7 +4423,7 @@ impl OledVlcPlayer {
             ))
             .flex()
             .flex_col()
-            .gap_2()
+            .gap(px(8.0 * library_scale))
             .w(px(card_width))
             .flex_none()
             .min_w_0()
@@ -3109,7 +4470,8 @@ impl OledVlcPlayer {
                             .items_center()
                             .justify_center()
                             .text_color(rgb(MUTED_TEXT))
-                            .text_xs()
+                            .text_size(px(12.0 * library_scale))
+                            .line_height(px(16.0 * library_scale))
                             .child("Folder")
                     })
                     .when(
@@ -3125,7 +4487,8 @@ impl OledVlcPlayer {
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .text_lg()
+                                    .text_size(px(18.0 * library_scale))
+                                    .line_height(px(24.0 * library_scale))
                                     .text_color(rgb(MUTED_TEXT))
                                     .child(placeholder_label),
                             )
@@ -3138,8 +4501,8 @@ impl OledVlcPlayer {
                                 .left_0()
                                 .right_0()
                                 .bottom_0()
-                                .px_2()
-                                .py_2()
+                                .px(px(8.0 * library_scale))
+                                .py(px(8.0 * library_scale))
                                 .bg(linear_gradient(
                                     180.0,
                                     linear_color_stop(gpui::transparent_black(), 0.0),
@@ -3151,6 +4514,7 @@ impl OledVlcPlayer {
                                         title_overlay_width,
                                         &section_title,
                                         &item_path,
+                                        library_scale,
                                     ),
                                 )),
                         )
@@ -3163,17 +4527,25 @@ impl OledVlcPlayer {
                                     item_path_for_remove.display()
                                 ))
                                 .absolute()
-                                .top(px(8.0))
-                                .right(px(8.0))
-                                .w(px(28.0))
-                                .h(px(28.0))
+                                .top(px(8.0 * library_scale))
+                                .right(px(8.0 * library_scale))
+                                .w(px(28.0 * library_scale))
+                                .h(px(28.0 * library_scale))
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .bg(rgb_alpha(OLED_BLACK, 0.78))
+                                .rounded_full()
                                 .text_color(rgb(SOFT_WHITE))
                                 .cursor_pointer()
-                                .hover(|button| button.bg(rgb_alpha(0xbb2222, 0.82)))
+                                .on_hover(cx.listener(
+                                    move |player, is_hovered: &bool, _window, cx| {
+                                        player.update_continue_remove_hover(
+                                            item_path_for_remove_hover.clone(),
+                                            *is_hovered,
+                                            cx,
+                                        );
+                                    },
+                                ))
                                 .on_click(cx.listener(move |player, _, _window, cx| {
                                     player.dismiss_continue_watching_entry(
                                         item_path_for_remove.clone(),
@@ -3181,27 +4553,31 @@ impl OledVlcPlayer {
                                     );
                                     cx.stop_propagation();
                                 }))
-                                .child(
-                                    svg()
-                                        .external_path(crate::icon_path(ICON_X))
-                                        .w(px(16.0))
-                                        .h(px(16.0))
-                                        .text_color(rgb(SOFT_WHITE)),
-                                ),
+                                .child(render_continue_remove_icon(
+                                    &item_path,
+                                    is_continue_remove_hovered,
+                                    is_continue_remove_exiting,
+                                    continue_remove_scale_animation_generation,
+                                    library_scale,
+                                )),
                         )
                     })
                     .when_some(episode_badge, |frame, episode_badge| {
                         frame.child(
                             div()
                                 .absolute()
-                                .right(px(8.0))
-                                .bottom(px(8.0))
-                                .px_2()
-                                .py_1()
-                                .text_xs()
-                                .line_height(px(14.0))
+                                .right(px(8.0 * library_scale))
+                                .bottom(px(8.0 * library_scale))
+                                .px(px(8.0 * library_scale))
+                                .py(px(4.0 * library_scale))
+                                .text_size(px(12.0 * library_scale))
+                                .line_height(px(14.0 * library_scale))
                                 .text_color(rgb(SOFT_WHITE))
-                                .bg(rgb_alpha(OLED_BLACK, 0.78))
+                                .bg(if self.settings.is_backdrop_blur_enabled {
+                                    rgb_alpha(OLED_BLACK, BACKDROP_BLUR_FLOATING_CONTROL_ALPHA)
+                                } else {
+                                    rgb_alpha(OLED_BLACK, 0.78)
+                                })
                                 .child(episode_badge),
                         )
                     })
@@ -3210,14 +4586,18 @@ impl OledVlcPlayer {
                             div()
                                 .id(format!("library-watched-badge-{}", item_path.display()))
                                 .absolute()
-                                .top(px(8.0))
-                                .left(px(8.0))
-                                .w(px(30.0))
-                                .h(px(30.0))
+                                .top(px(8.0 * library_scale))
+                                .left(px(8.0 * library_scale))
+                                .w(px(30.0 * library_scale))
+                                .h(px(30.0 * library_scale))
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .bg(rgb_alpha(OLED_BLACK, 0.88))
+                                .bg(if self.settings.is_backdrop_blur_enabled {
+                                    rgb_alpha(OLED_BLACK, BACKDROP_BLUR_MENU_BACKGROUND_ALPHA)
+                                } else {
+                                    rgb_alpha(OLED_BLACK, 0.88)
+                                })
                                 .border_1()
                                 .border_color(rgb_alpha(SOFT_WHITE, 0.46))
                                 .text_color(rgb(SOFT_WHITE))
@@ -3225,8 +4605,8 @@ impl OledVlcPlayer {
                                 .child(
                                     svg()
                                         .external_path(crate::icon_path(ICON_EYE))
-                                        .w(px(17.0))
-                                        .h(px(17.0))
+                                        .w(px(17.0 * library_scale))
+                                        .h(px(17.0 * library_scale))
                                         .text_color(rgb(SOFT_WHITE)),
                                 ),
                         )
@@ -3236,7 +4616,8 @@ impl OledVlcPlayer {
                 card.child(
                     div()
                         .min_w_0()
-                        .text_xs()
+                        .text_size(px(12.0 * library_scale))
+                        .line_height(px(16.0 * library_scale))
                         .text_color(rgb(MUTED_TEXT))
                         .truncate()
                         .child(subtitle),
@@ -3244,7 +4625,12 @@ impl OledVlcPlayer {
             })
     }
 
-    fn render_top_overlay(&self, is_window_fullscreen: bool, cx: &mut Context<Self>) -> Div {
+    fn render_top_overlay(
+        &self,
+        is_window_fullscreen: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let is_live_capture = self.is_current_media_live_capture();
         let fullscreen_icon_path = if is_window_fullscreen {
             ICON_MINIMIZE
         } else {
@@ -3257,6 +4643,7 @@ impl OledVlcPlayer {
         };
 
         div()
+            .id("top-player-overlay")
             .absolute()
             .top_0()
             .left_0()
@@ -3271,20 +4658,26 @@ impl OledVlcPlayer {
                 linear_color_stop(gpui::transparent_black(), 1.0),
             ))
             .opacity(if self.are_controls_visible { 1.0 } else { 0.0 })
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .text_color(rgb(SOFT_WHITE))
-                    .child(div().text_lg().child(self.current_media_title()))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(MUTED_TEXT))
-                            .child(self.current_media_detail()),
-                    ),
-            )
+            .on_hover(cx.listener(|player, is_hovered: &bool, window, cx| {
+                player.set_player_overlay_hover(*is_hovered, window, cx);
+            }))
+            .when(is_live_capture, |overlay| overlay.child(div().flex_1()))
+            .when(!is_live_capture, |overlay| {
+                overlay.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .text_color(rgb(SOFT_WHITE))
+                        .child(div().text_lg().child(self.current_media_title()))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(MUTED_TEXT))
+                                .child(self.current_media_detail()),
+                        ),
+                )
+            })
             .child(
                 div()
                     .flex()
@@ -3311,8 +4704,11 @@ impl OledVlcPlayer {
             )
     }
 
-    fn render_bottom_controls(&self, cx: &mut Context<Self>) -> Div {
+    fn render_bottom_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let is_live_capture = self.is_current_media_live_capture();
+
         div()
+            .id("bottom-player-overlay")
             .absolute()
             .left_0()
             .right_0()
@@ -3327,8 +4723,17 @@ impl OledVlcPlayer {
                 linear_color_stop(gpui::transparent_black(), 1.0),
             ))
             .opacity(if self.are_controls_visible { 1.0 } else { 0.0 })
-            .child(self.render_progress_bar(cx))
-            .child(self.render_transport_controls(cx))
+            .on_hover(cx.listener(|player, is_hovered: &bool, window, cx| {
+                player.set_player_overlay_hover(*is_hovered, window, cx);
+            }))
+            .when(!is_live_capture, |controls| {
+                controls.child(self.render_progress_bar(cx))
+            })
+            .child(if is_live_capture {
+                self.render_live_capture_controls(cx)
+            } else {
+                self.render_transport_controls(cx)
+            })
     }
 
     fn render_progress_bar(&self, cx: &mut Context<Self>) -> Div {
@@ -3403,7 +4808,7 @@ impl OledVlcPlayer {
                     let timeline_fraction =
                         timeline_fraction_from_window_position(window, event.position);
                     player.is_timeline_scrubbing = true;
-                    player.seek_to_timeline_fraction(timeline_fraction, window, cx);
+                    player.scrub_to_timeline_fraction(timeline_fraction, window, cx);
                     cx.stop_propagation();
                 }),
             )
@@ -3457,7 +4862,9 @@ impl OledVlcPlayer {
             .bottom(px(34.0))
             .w(px(THUMBNAIL_PREVIEW_WIDTH))
             .p_1()
-            .bg(rgb(MENU_BLACK))
+            .bg(self
+                .settings
+                .surface_background_color(MENU_BLACK, BACKDROP_BLUR_MENU_BACKGROUND_ALPHA))
             .border_1()
             .border_color(rgb(BRIGHT_BORDER))
             .shadow_lg()
@@ -3561,6 +4968,29 @@ impl OledVlcPlayer {
             .child(volume_slider(self.volume_percent, cx))
     }
 
+    fn render_live_capture_controls(&self, cx: &mut Context<Self>) -> Div {
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .text_color(rgb(SOFT_WHITE))
+            .child(div().flex_1())
+            .child(icon_button(
+                "live-capture-mute",
+                if self.is_muted {
+                    ICON_VOLUME_MUTED
+                } else {
+                    ICON_VOLUME
+                },
+                if self.is_muted { "Unmute" } else { "Mute" },
+                cx,
+                |player, window, cx| {
+                    player.toggle_mute(window, cx);
+                },
+            ))
+            .child(volume_slider(self.volume_percent, cx))
+    }
+
     fn render_playback_mode_toggles(&self, id_prefix: &'static str, cx: &mut Context<Self>) -> Div {
         div()
             .flex()
@@ -3601,7 +5031,10 @@ impl OledVlcPlayer {
             .right(px(MENU_RIGHT_MARGIN))
             .w(px(MAIN_MENU_WIDTH))
             .p_2()
-            .bg(rgb(MENU_BLACK))
+            .bg(self
+                .settings
+                .surface_background_color(MENU_BLACK, BACKDROP_BLUR_MENU_BACKGROUND_ALPHA))
+            .rounded_sm()
             .border_1()
             .border_color(rgb(BRIGHT_BORDER))
             .shadow_lg()
@@ -3697,6 +5130,7 @@ impl OledVlcPlayer {
         let is_open_media_open =
             self.open_context_menu_section == Some(ContextMenuSection::OpenMedia);
         let is_queue_open = self.open_context_menu_section == Some(ContextMenuSection::Queue);
+        let is_live_capture = self.is_current_media_live_capture();
 
         div()
             .absolute()
@@ -3704,7 +5138,10 @@ impl OledVlcPlayer {
             .top(px(menu_top))
             .w(px(CONTEXT_MENU_WIDTH))
             .p_2()
-            .bg(rgb(MENU_BLACK))
+            .bg(self
+                .settings
+                .surface_background_color(MENU_BLACK, BACKDROP_BLUR_MENU_BACKGROUND_ALPHA))
+            .rounded_sm()
             .border_1()
             .border_color(rgb(BRIGHT_BORDER))
             .shadow_lg()
@@ -3712,45 +5149,47 @@ impl OledVlcPlayer {
             .flex_col()
             .gap_1()
             .text_color(rgb(SOFT_WHITE))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(context_icon_button(
-                        "context-play",
-                        if self.is_playing {
-                            ICON_PAUSE
-                        } else {
-                            ICON_PLAY
-                        },
-                        "Play or pause",
-                        cx,
-                        |player, window, cx| {
-                            player.toggle_playback(&TogglePlayback, window, cx);
-                        },
-                    ))
-                    .child(context_icon_button(
-                        "context-previous",
-                        ICON_PREVIOUS,
-                        "Previous queue item",
-                        cx,
-                        |player, window, cx| {
-                            player.play_previous_queue_item(window, cx);
-                        },
-                    ))
-                    .child(context_icon_button(
-                        "context-next",
-                        ICON_NEXT,
-                        "Next queue item",
-                        cx,
-                        |player, window, cx| {
-                            player.play_next_queue_item(window, cx);
-                        },
-                    ))
-                    .child(div().flex_1())
-                    .child(self.render_playback_mode_toggles("context-menu", cx)),
-            )
+            .when(!is_live_capture, |menu| {
+                menu.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(context_icon_button(
+                            "context-play",
+                            if self.is_playing {
+                                ICON_PAUSE
+                            } else {
+                                ICON_PLAY
+                            },
+                            "Play or pause",
+                            cx,
+                            |player, window, cx| {
+                                player.toggle_playback(&TogglePlayback, window, cx);
+                            },
+                        ))
+                        .child(context_icon_button(
+                            "context-previous",
+                            ICON_PREVIOUS,
+                            "Previous queue item",
+                            cx,
+                            |player, window, cx| {
+                                player.play_previous_queue_item(window, cx);
+                            },
+                        ))
+                        .child(context_icon_button(
+                            "context-next",
+                            ICON_NEXT,
+                            "Next queue item",
+                            cx,
+                            |player, window, cx| {
+                                player.play_next_queue_item(window, cx);
+                            },
+                        ))
+                        .child(div().flex_1())
+                        .child(self.render_playback_mode_toggles("context-menu", cx)),
+                )
+            })
             .child(context_section_button(
                 "Audio",
                 self.selected_audio_track_label(),
@@ -3828,13 +5267,20 @@ impl OledVlcPlayer {
             .flex()
             .items_center()
             .justify_center()
-            .bg(rgb_alpha(OLED_BLACK, 0.78))
+            .bg(if self.settings.is_backdrop_blur_enabled {
+                rgb_alpha(OLED_BLACK, BACKDROP_BLUR_MODAL_BACKDROP_ALPHA)
+            } else {
+                rgb_alpha(OLED_BLACK, 0.78)
+            })
             .child(
                 div()
                     .id("continue-watching-dialog")
                     .w(px(CONTINUE_WATCHING_PROMPT_WIDTH))
                     .p_4()
-                    .bg(rgb(MENU_BLACK))
+                    .bg(self
+                        .settings
+                        .surface_background_color(MENU_BLACK, BACKDROP_BLUR_MODAL_BACKGROUND_ALPHA))
+                    .rounded_sm()
                     .border_1()
                     .border_color(rgb(BRIGHT_BORDER))
                     .shadow_lg()
@@ -3866,6 +5312,7 @@ impl OledVlcPlayer {
                                 "continue-watching-no",
                                 "No",
                                 false,
+                                1.0,
                                 cx,
                                 |player, window, cx| {
                                     player.decline_saved_watch_session(window, cx);
@@ -3875,6 +5322,7 @@ impl OledVlcPlayer {
                                 "continue-watching-yes",
                                 "Yes",
                                 true,
+                                1.0,
                                 cx,
                                 |player, window, cx| {
                                     player.continue_saved_watch_session(window, cx);
@@ -3895,7 +5343,11 @@ impl OledVlcPlayer {
             .flex()
             .items_center()
             .justify_center()
-            .bg(rgb_alpha(OLED_BLACK, 0.78))
+            .bg(if self.settings.is_backdrop_blur_enabled {
+                rgb_alpha(OLED_BLACK, BACKDROP_BLUR_MODAL_BACKDROP_ALPHA)
+            } else {
+                rgb_alpha(OLED_BLACK, 0.78)
+            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|player, _event, _window, cx| {
@@ -3907,7 +5359,10 @@ impl OledVlcPlayer {
                     .id("settings-modal")
                     .w(px(SETTINGS_MODAL_WIDTH))
                     .p_4()
-                    .bg(rgb(MENU_BLACK))
+                    .bg(self
+                        .settings
+                        .surface_background_color(MENU_BLACK, BACKDROP_BLUR_MODAL_BACKGROUND_ALPHA))
+                    .rounded_sm()
                     .border_1()
                     .border_color(rgb(BRIGHT_BORDER))
                     .shadow_lg()
@@ -3976,6 +5431,9 @@ impl OledVlcPlayer {
                     )
                     .child(self.render_settings_menu_section(cx)),
             )
+            .when_some(self.open_settings_selector, |backdrop, selector_kind| {
+                backdrop.child(self.render_settings_selector_overlay(selector_kind, cx))
+            })
     }
 
     fn render_audio_track_selector(&self, cx: &mut Context<Self>) -> Div {
@@ -4119,52 +5577,304 @@ impl OledVlcPlayer {
             .gap_1()
             .child(self.render_default_volume_setting_row(cx))
             .child(self.render_settings_action_row(
+                "Audio Output",
+                audio_output_device_label(&self.settings.audio_output_device),
+                cx,
+                |player, _window, cx| {
+                    player.open_settings_selector(SettingsSelectorKind::AudioOutput, cx);
+                },
+            ))
+            .child(self.render_settings_action_row(
                 "Resume",
                 self.settings.resume_behavior.label().to_string(),
                 cx,
-                |player, window, cx| {
-                    player.cycle_resume_behavior_setting(window, cx);
+                |player, _window, cx| {
+                    player.open_settings_selector(SettingsSelectorKind::ResumeBehavior, cx);
                 },
             ))
             .child(self.render_settings_action_row(
                 "Audio Language",
                 self.settings.preferred_audio_language.clone(),
                 cx,
-                |player, window, cx| {
-                    player.cycle_audio_language_setting(window, cx);
+                |player, _window, cx| {
+                    player.open_settings_selector(SettingsSelectorKind::PreferredAudioLanguage, cx);
                 },
             ))
             .child(self.render_settings_action_row(
                 "Subtitle Language",
                 self.settings.preferred_subtitle_language.clone(),
                 cx,
-                |player, window, cx| {
-                    player.cycle_subtitle_language_setting(window, cx);
+                |player, _window, cx| {
+                    player.open_settings_selector(
+                        SettingsSelectorKind::PreferredSubtitleLanguage,
+                        cx,
+                    );
                 },
             ))
             .child(self.render_settings_action_row(
                 "Hardware Decode",
                 self.settings.hardware_decoding_mode.clone(),
                 cx,
-                |player, window, cx| {
-                    player.cycle_hardware_decoding_setting(window, cx);
+                |player, _window, cx| {
+                    player.open_settings_selector(SettingsSelectorKind::HardwareDecoding, cx);
                 },
             ))
-            .child(
-                self.render_settings_action_row(
-                    "Start Fullscreen",
-                    if self.settings.start_fullscreen {
-                        "On"
-                    } else {
-                        "Off"
-                    }
-                    .to_string(),
-                    cx,
-                    |player, window, cx| {
-                        player.toggle_start_fullscreen_setting(window, cx);
-                    },
-                ),
+            .child(self.render_settings_action_row(
+                "Start Fullscreen",
+                on_off_label(self.settings.start_fullscreen).to_string(),
+                cx,
+                |player, _window, cx| {
+                    player.open_settings_selector(SettingsSelectorKind::StartFullscreen, cx);
+                },
+            ))
+            .child(self.render_settings_action_row(
+                "Live Lowest Latency",
+                on_off_label(self.settings.is_lowest_latency_live_capture_enabled).to_string(),
+                cx,
+                |player, _window, cx| {
+                    player.open_settings_selector(SettingsSelectorKind::LiveLowestLatency, cx);
+                },
+            ))
+            .child(self.render_settings_action_row(
+                "Exclusive Audio",
+                on_off_label(self.settings.is_live_capture_exclusive_audio_enabled).to_string(),
+                cx,
+                |player, _window, cx| {
+                    player.open_settings_selector(
+                        SettingsSelectorKind::LiveCaptureExclusiveAudio,
+                        cx,
+                    );
+                },
+            ))
+            .child(self.render_settings_action_row(
+                "Backdrop Blur",
+                on_off_label(self.settings.is_backdrop_blur_enabled).to_string(),
+                cx,
+                |player, _window, cx| {
+                    player.open_settings_selector(SettingsSelectorKind::BackdropBlur, cx);
+                },
+            ))
+    }
+
+    fn render_settings_selector_overlay(
+        &self,
+        selector_kind: SettingsSelectorKind,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let selector_options = self.settings_selector_options(selector_kind);
+
+        div()
+            .id("settings-selector-overlay")
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgb_alpha(OLED_BLACK, 0.34))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|player, _event, _window, cx| {
+                    player.close_settings_selector(cx);
+                    cx.stop_propagation();
+                }),
             )
+            .child(
+                div()
+                    .id(format!(
+                        "settings-selector-{}",
+                        library_safe_element_key(selector_kind.title())
+                    ))
+                    .w(px(360.0))
+                    .max_h(px(430.0))
+                    .overflow_y_scroll()
+                    .scrollbar_width(px(4.0))
+                    .p_2()
+                    .bg(self
+                        .settings
+                        .surface_background_color(MENU_BLACK, BACKDROP_BLUR_MODAL_BACKGROUND_ALPHA))
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(rgb(BRIGHT_BORDER))
+                    .shadow_lg()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .text_color(rgb(SOFT_WHITE))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|_player, _event, _window, cx| {
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .child(
+                        div()
+                            .px_2()
+                            .py_1()
+                            .text_sm()
+                            .text_color(rgb(MUTED_TEXT))
+                            .child(selector_kind.title()),
+                    )
+                    .children(selector_options.into_iter().map(|selector_option| {
+                        self.render_settings_selector_option(selector_option, cx)
+                    })),
+            )
+    }
+
+    fn render_settings_selector_option(
+        &self,
+        selector_option: SettingsSelectorOption,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let selector_choice = selector_option.choice.clone();
+
+        div()
+            .id(format!(
+                "settings-selector-option-{}",
+                library_safe_element_key(&selector_option.label)
+            ))
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .py_1()
+            .bg(if selector_option.is_selected {
+                rgb_alpha(VLC_ORANGE, 0.12)
+            } else {
+                rgb_alpha(OLED_BLACK, 0.0)
+            })
+            .cursor_pointer()
+            .hover(|row| row.bg(rgb(0x121212)))
+            .on_click(cx.listener(move |player, _event, window, cx| {
+                player.apply_settings_selector_choice(selector_choice.clone(), window, cx);
+                cx.stop_propagation();
+            }))
+            .child(div().text_sm().flex_1().child(selector_option.label))
+            .when_some(selector_option.detail, |option_row, detail| {
+                option_row.child(div().text_xs().text_color(rgb(MUTED_TEXT)).child(detail))
+            })
+            .when(selector_option.is_selected, |option_row| {
+                option_row.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(VLC_ORANGE))
+                        .child("Selected"),
+                )
+            })
+    }
+
+    fn settings_selector_options(
+        &self,
+        selector_kind: SettingsSelectorKind,
+    ) -> Vec<SettingsSelectorOption> {
+        match selector_kind {
+            SettingsSelectorKind::AudioOutput => AUDIO_OUTPUT_DEVICE_OPTIONS
+                .iter()
+                .map(|audio_output_device| SettingsSelectorOption {
+                    label: audio_output_device.label.to_string(),
+                    detail: None,
+                    is_selected: self.settings.audio_output_device == audio_output_device.device_id,
+                    choice: SettingsSelectorChoice::AudioOutputDevice(
+                        audio_output_device.device_id.to_string(),
+                    ),
+                })
+                .collect(),
+            SettingsSelectorKind::ResumeBehavior => [
+                ResumeBehavior::Ask,
+                ResumeBehavior::Always,
+                ResumeBehavior::Never,
+            ]
+            .into_iter()
+            .map(|resume_behavior| SettingsSelectorOption {
+                label: resume_behavior.label().to_string(),
+                detail: None,
+                is_selected: self.settings.resume_behavior == resume_behavior,
+                choice: SettingsSelectorChoice::ResumeBehavior(resume_behavior),
+            })
+            .collect(),
+            SettingsSelectorKind::PreferredAudioLanguage => self
+                .language_settings_selector_options(
+                    &self.settings.preferred_audio_language,
+                    SettingsSelectorChoice::PreferredAudioLanguage,
+                ),
+            SettingsSelectorKind::PreferredSubtitleLanguage => self
+                .language_settings_selector_options(
+                    &self.settings.preferred_subtitle_language,
+                    SettingsSelectorChoice::PreferredSubtitleLanguage,
+                ),
+            SettingsSelectorKind::HardwareDecoding => [
+                ("Auto Safe", "auto-safe"),
+                ("D3D11VA", "d3d11va"),
+                ("Off", "no"),
+            ]
+            .into_iter()
+            .map(|(label, hardware_decoding_mode)| SettingsSelectorOption {
+                label: label.to_string(),
+                detail: Some(hardware_decoding_mode.to_string()),
+                is_selected: self.settings.hardware_decoding_mode == hardware_decoding_mode,
+                choice: SettingsSelectorChoice::HardwareDecodingMode(
+                    hardware_decoding_mode.to_string(),
+                ),
+            })
+            .collect(),
+            SettingsSelectorKind::StartFullscreen => self.boolean_settings_selector_options(
+                self.settings.start_fullscreen,
+                SettingsSelectorChoice::StartFullscreen,
+            ),
+            SettingsSelectorKind::LiveLowestLatency => self.boolean_settings_selector_options(
+                self.settings.is_lowest_latency_live_capture_enabled,
+                SettingsSelectorChoice::LiveLowestLatency,
+            ),
+            SettingsSelectorKind::LiveCaptureExclusiveAudio => self
+                .boolean_settings_selector_options(
+                    self.settings.is_live_capture_exclusive_audio_enabled,
+                    SettingsSelectorChoice::LiveCaptureExclusiveAudio,
+                ),
+            SettingsSelectorKind::BackdropBlur => self.boolean_settings_selector_options(
+                self.settings.is_backdrop_blur_enabled,
+                SettingsSelectorChoice::BackdropBlur,
+            ),
+        }
+    }
+
+    fn language_settings_selector_options(
+        &self,
+        selected_language: &str,
+        build_selector_choice: fn(String) -> SettingsSelectorChoice,
+    ) -> Vec<SettingsSelectorOption> {
+        [
+            ("English", "eng"),
+            ("Japanese", "jpn"),
+            ("Spanish", "spa"),
+            ("French", "fra"),
+            ("Any", "any"),
+        ]
+        .into_iter()
+        .map(|(label, language_code)| SettingsSelectorOption {
+            label: label.to_string(),
+            detail: Some(language_code.to_string()),
+            is_selected: selected_language == language_code,
+            choice: build_selector_choice(language_code.to_string()),
+        })
+        .collect()
+    }
+
+    fn boolean_settings_selector_options(
+        &self,
+        is_enabled: bool,
+        build_selector_choice: fn(bool) -> SettingsSelectorChoice,
+    ) -> Vec<SettingsSelectorOption> {
+        [false, true]
+            .into_iter()
+            .map(|is_option_enabled| SettingsSelectorOption {
+                label: on_off_label(is_option_enabled).to_string(),
+                detail: None,
+                is_selected: is_enabled == is_option_enabled,
+                choice: build_selector_choice(is_option_enabled),
+            })
+            .collect()
     }
 
     fn render_default_volume_setting_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -4244,8 +5954,8 @@ impl OledVlcPlayer {
         let is_current = self.current_queue_index == Some(queue_index);
         let can_move_up = queue_index > 0;
         let can_move_down = queue_index + 1 < self.playback_queue.len();
-        let media_title = queue_display_name(&media.path);
-        let media_path = media.path.display().to_string();
+        let media_title = media.queue_title();
+        let media_detail = media.display_detail();
 
         div()
             .id(format!("queue-item-{queue_index}"))
@@ -4277,7 +5987,7 @@ impl OledVlcPlayer {
                             .text_xs()
                             .text_color(rgb(MUTED_TEXT))
                             .truncate()
-                            .child(media_path),
+                            .child(media_detail),
                     ),
             )
             .child(queue_row_icon_button(
@@ -4483,6 +6193,8 @@ impl Render for OledVlcPlayer {
         let viewport_width = viewport_size.width.as_f32();
         let viewport_height = viewport_size.height.as_f32();
         let is_video_surface_active = self.is_video_surface_active();
+        let should_show_blurred_library_backdrop =
+            self.settings.is_backdrop_blur_enabled && self.is_library_surface_visible();
 
         div()
             .id("oled-vlc-player")
@@ -4501,11 +6213,14 @@ impl Render for OledVlcPlayer {
             .on_action(cx.listener(Self::cycle_repeat_mode))
             .track_focus(&self.focus_handle)
             .size_full()
-            .bg(if is_video_surface_active {
-                rgb_alpha(OLED_BLACK, 0.0)
-            } else {
-                rgb(OLED_BLACK)
-            })
+            .bg(
+                if is_video_surface_active || should_show_blurred_library_backdrop {
+                    rgb_alpha(OLED_BLACK, 0.0)
+                } else {
+                    self.settings
+                        .surface_background_color(OLED_BLACK, BACKDROP_BLUR_BASE_BACKGROUND_ALPHA)
+                },
+            )
             .text_color(rgb(SOFT_WHITE))
             .p_0()
             .flex()
@@ -4586,20 +6301,98 @@ impl Drop for OledVlcPlayer {
     }
 }
 
+fn render_continue_remove_icon(
+    media_path: &Path,
+    is_hovered: bool,
+    is_exiting: bool,
+    animation_generation: u64,
+    library_scale: f32,
+) -> AnyElement {
+    let icon = svg()
+        .external_path(crate::icon_path(ICON_X))
+        .w(px(16.0 * library_scale))
+        .h(px(16.0 * library_scale))
+        .text_color(rgb(SOFT_WHITE));
+
+    if !is_hovered && !is_exiting {
+        return icon.into_any_element();
+    }
+
+    let animation_direction = if is_hovered { "grow" } else { "shrink" };
+    let animation_id = format!(
+        "continue-remove-scale-{:016x}-{animation_direction}-{animation_generation}",
+        media_path_hash(media_path)
+    );
+
+    icon.with_animation(
+        animation_id,
+        Animation::new(Duration::from_millis(CONTINUE_REMOVE_SCALE_ANIMATION_MS))
+            .with_easing(ease_in_out),
+        move |icon, delta| {
+            let scale_delta = if is_hovered { delta } else { 1.0 - delta };
+            let icon_scale = 1.0 + ((CONTINUE_REMOVE_HOVER_SCALE - 1.0) * scale_delta);
+
+            icon.with_transformation(Transformation::scale(size(icon_scale, icon_scale)))
+        },
+    )
+    .into_any_element()
+}
+
+fn render_scaled_library_icon(
+    icon_file_name: &'static str,
+    icon_key: &str,
+    icon_width_px: f32,
+    icon_height_px: f32,
+    is_hovered: bool,
+    is_exiting: bool,
+    animation_generation: u64,
+) -> AnyElement {
+    let icon = svg()
+        .external_path(crate::icon_path(icon_file_name))
+        .w(px(icon_width_px))
+        .h(px(icon_height_px))
+        .text_color(rgb(SOFT_WHITE));
+
+    if !is_hovered && !is_exiting {
+        return icon.into_any_element();
+    }
+
+    let animation_direction = if is_hovered { "grow" } else { "shrink" };
+    let animation_id = format!(
+        "library-icon-scale-{}-{animation_direction}-{animation_generation}",
+        library_safe_element_key(icon_key)
+    );
+
+    icon.with_animation(
+        animation_id,
+        Animation::new(Duration::from_millis(LIBRARY_ICON_SCALE_ANIMATION_MS))
+            .with_easing(ease_in_out),
+        move |icon, delta| {
+            let scale_delta = if is_hovered { delta } else { 1.0 - delta };
+            let icon_scale = 1.0 + ((LIBRARY_ICON_HOVER_SCALE - 1.0) * scale_delta);
+
+            icon.with_transformation(Transformation::scale(size(icon_scale, icon_scale)))
+        },
+    )
+    .into_any_element()
+}
+
 fn render_autoscrolling_library_title(
     title: String,
     card_width: f32,
     section_title: &str,
     media_path: &Path,
+    library_scale: f32,
 ) -> AnyElement {
-    let scroll_distance = library_title_scroll_distance(&title, card_width);
+    let title_line_height = LIBRARY_TITLE_LINE_HEIGHT_PX * library_scale;
+    let scroll_distance = library_title_scroll_distance(&title, card_width, library_scale);
 
     if scroll_distance <= 0.0 {
         return div()
             .min_w_0()
-            .h(px(LIBRARY_TITLE_LINE_HEIGHT_PX))
-            .text_sm()
-            .line_height(px(LIBRARY_TITLE_LINE_HEIGHT_PX))
+            .h(px(title_line_height))
+            .text_size(px(14.0 * library_scale))
+            .line_height(px(title_line_height))
             .text_color(rgb(SOFT_WHITE))
             .truncate()
             .child(title)
@@ -4616,15 +6409,15 @@ fn render_autoscrolling_library_title(
     div()
         .relative()
         .w_full()
-        .h(px(LIBRARY_TITLE_LINE_HEIGHT_PX))
+        .h(px(title_line_height))
         .overflow_hidden()
         .child(
             div()
                 .absolute()
                 .top_0()
                 .left_0()
-                .text_sm()
-                .line_height(px(LIBRARY_TITLE_LINE_HEIGHT_PX))
+                .text_size(px(14.0 * library_scale))
+                .line_height(px(title_line_height))
                 .text_color(rgb(SOFT_WHITE))
                 .whitespace_nowrap()
                 .child(title)
@@ -4639,12 +6432,14 @@ fn render_autoscrolling_library_title(
         .into_any_element()
 }
 
-fn library_title_scroll_distance(title: &str, card_width: f32) -> f32 {
+fn library_title_scroll_distance(title: &str, card_width: f32, library_scale: f32) -> f32 {
     let estimated_title_width =
-        title.chars().count() as f32 * LIBRARY_TITLE_AVERAGE_CHARACTER_WIDTH_PX;
+        title.chars().count() as f32 * LIBRARY_TITLE_AVERAGE_CHARACTER_WIDTH_PX * library_scale;
     let available_title_width = card_width.max(1.0);
 
-    (estimated_title_width - available_title_width + LIBRARY_TITLE_SCROLL_END_PADDING_PX).max(0.0)
+    (estimated_title_width - available_title_width
+        + (LIBRARY_TITLE_SCROLL_END_PADDING_PX * library_scale))
+        .max(0.0)
 }
 
 fn library_title_scroll_duration(scroll_distance: f32) -> Duration {
@@ -4689,6 +6484,16 @@ fn empty_menu_message(message: &'static str) -> Div {
         .py_1()
         .text_color(rgb(MUTED_TEXT))
         .text_xs()
+        .child(message)
+}
+
+fn scaled_menu_message(message: &'static str, menu_scale: f32) -> Div {
+    div()
+        .px(px(8.0 * menu_scale))
+        .py(px(4.0 * menu_scale))
+        .text_color(rgb(MUTED_TEXT))
+        .text_size(px(12.0 * menu_scale))
+        .line_height(px(16.0 * menu_scale))
         .child(message)
 }
 
@@ -4898,14 +6703,16 @@ fn prompt_action_button(
     id: &'static str,
     label: &'static str,
     is_primary: bool,
+    button_scale: f32,
     cx: &mut Context<OledVlcPlayer>,
     on_click: impl Fn(&mut OledVlcPlayer, &mut Window, &mut Context<OledVlcPlayer>) + 'static,
 ) -> impl IntoElement {
     div()
         .id(id)
-        .px_4()
-        .py_2()
-        .text_sm()
+        .px(px(16.0 * button_scale))
+        .py(px(8.0 * button_scale))
+        .text_size(px(14.0 * button_scale))
+        .line_height(px(20.0 * button_scale))
         .text_color(if is_primary {
             rgb(OLED_BLACK)
         } else {
@@ -5053,6 +6860,90 @@ fn create_playback_ipc_path() -> String {
         .unwrap_or_default();
 
     create_platform_playback_ipc_path(timestamp_millis)
+}
+
+fn create_playback_log_path() -> PathBuf {
+    let timestamp_millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    let log_directory = watch_session_directory().join("mpv-logs");
+    let _ = fs::create_dir_all(&log_directory);
+
+    log_directory.join(format!(
+        "watch-mpv-{}-{timestamp_millis}.log",
+        std::process::id()
+    ))
+}
+
+fn concise_mpv_log_message(log_path: &Path) -> Option<String> {
+    let log_contents = fs::read_to_string(log_path).ok()?;
+    let cleaned_log_lines = log_contents
+        .lines()
+        .rev()
+        .map(|line| clean_mpv_log_line(line.trim()))
+        .filter(|line| !line.is_empty())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let priority_error_fragments = [
+        "could not run graph",
+        "avformat_open_input() failed",
+        "could not find audio only device",
+        "could not find",
+    ];
+    let priority_error_line = priority_error_fragments.iter().find_map(|error_fragment| {
+        cleaned_log_lines
+            .iter()
+            .find(|line| line.to_ascii_lowercase().contains(error_fragment))
+            .cloned()
+    });
+    let actionable_error_line = cleaned_log_lines
+        .iter()
+        .find(|line| is_actionable_mpv_error_line(line))
+        .cloned();
+    let fallback_line = cleaned_log_lines
+        .iter()
+        .find(|line| !line.to_ascii_lowercase().contains("exiting"))
+        .cloned()?;
+    let message = priority_error_line
+        .or(actionable_error_line)
+        .unwrap_or(fallback_line);
+
+    Some(truncate_status_message(&message, 180))
+}
+
+fn clean_mpv_log_line(line: &str) -> &str {
+    line.rsplit_once("] ")
+        .map(|(_, message)| message)
+        .unwrap_or(line)
+}
+
+fn is_actionable_mpv_error_line(line: &str) -> bool {
+    let lowercase_line = line.to_ascii_lowercase();
+    if lowercase_line.contains("exiting")
+        || lowercase_line.contains("failed to recognize file format")
+        || lowercase_line.contains("failed sending hook command")
+    {
+        return false;
+    }
+
+    lowercase_line.contains("error")
+        || lowercase_line.contains("failed")
+        || lowercase_line.contains("could not")
+        || lowercase_line.contains("no such")
+}
+
+fn truncate_status_message(message: &str, max_character_count: usize) -> String {
+    let mut truncated_message = message
+        .chars()
+        .take(max_character_count)
+        .collect::<String>();
+
+    if message.chars().count() > max_character_count {
+        truncated_message.push_str("...");
+    }
+
+    truncated_message
 }
 
 #[cfg(target_os = "windows")]
@@ -5559,6 +7450,34 @@ fn queue_display_name(path: &Path) -> String {
         .unwrap_or(file_name)
 }
 
+fn playback_display_title(path: &Path) -> String {
+    let episode_identity = parse_episode_identity(path);
+    let Some(episode_number) = episode_identity.episode_number else {
+        return queue_display_name(path);
+    };
+
+    let episode_label = episode_display_label(episode_identity.season_number, episode_number);
+    let mut title_segments = vec![episode_identity.display_series_title, episode_label];
+
+    if let Some(episode_title) = episode_identity.episode_title {
+        if !episode_title.is_empty() {
+            title_segments.push(episode_title);
+        }
+    }
+
+    title_segments
+        .into_iter()
+        .filter(|title_segment| !title_segment.is_empty())
+        .collect::<Vec<_>>()
+        .join(" - ")
+}
+
+fn episode_display_label(season_number: Option<u32>, episode_number: u32) -> String {
+    season_number
+        .map(|season_number| format!("S{season_number:02}E{episode_number:02}"))
+        .unwrap_or_else(|| format!("Episode {episode_number}"))
+}
+
 fn strip_leading_bracket_tags(file_name: &str) -> Option<&str> {
     let mut remaining_file_name = file_name.trim_start();
     let mut removed_tag_count = 0;
@@ -5716,11 +7635,221 @@ fn compare_number_text(left: &str, right: &str) -> std::cmp::Ordering {
 
 fn build_loaded_media(path: &Path) -> LoadedMedia {
     LoadedMedia {
-        duration_seconds: discover_media_duration_seconds(path),
-        audio_tracks: discover_audio_tracks(path),
+        source: LoadedMediaSource::File(path.to_path_buf()),
+        duration_seconds: None,
+        audio_tracks: Vec::new(),
         subtitle_paths: discover_sidecar_subtitles(path),
-        embedded_subtitle_tracks: discover_embedded_subtitle_tracks(path),
-        path: path.to_path_buf(),
+        embedded_subtitle_tracks: Vec::new(),
+    }
+}
+
+fn build_live_capture_media(device: LiveCaptureDevice) -> LoadedMedia {
+    LoadedMedia {
+        source: LoadedMediaSource::LiveCapture(device),
+        duration_seconds: None,
+        audio_tracks: Vec::new(),
+        subtitle_paths: Vec::new(),
+        embedded_subtitle_tracks: Vec::new(),
+    }
+}
+
+fn list_live_capture_devices(ffmpeg_path: &Path) -> Result<LiveCaptureDeviceScan, String> {
+    #[cfg(target_os = "windows")]
+    {
+        list_windows_directshow_video_devices(ffmpeg_path)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = ffmpeg_path;
+        Err("Live capture device listing is currently supported on Windows.".to_string())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn list_windows_directshow_video_devices(
+    ffmpeg_path: &Path,
+) -> Result<LiveCaptureDeviceScan, String> {
+    let mut command = Command::new(ffmpeg_path);
+    command
+        .arg("-hide_banner")
+        .arg("-list_devices")
+        .arg("true")
+        .arg("-f")
+        .arg("dshow")
+        .arg("-i")
+        .arg("dummy")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    hide_child_process_window(&mut command);
+
+    let output = command
+        .output()
+        .map_err(|error| format!("Could not list live capture devices: {error}"))?;
+    let mut device_output = String::from_utf8_lossy(&output.stderr).to_string();
+    device_output.push_str(&String::from_utf8_lossy(&output.stdout));
+
+    Ok(parse_windows_directshow_video_devices(&device_output))
+}
+
+#[cfg(target_os = "windows")]
+fn parse_windows_directshow_video_devices(device_output: &str) -> LiveCaptureDeviceScan {
+    let mut devices = Vec::new();
+    let mut audio_devices = Vec::new();
+    let mut is_reading_video_devices = false;
+    let mut is_reading_audio_devices = false;
+    let mut audio_backend_names = Vec::new();
+
+    for line in device_output.lines() {
+        if line.contains("DirectShow video devices") {
+            is_reading_video_devices = true;
+            is_reading_audio_devices = false;
+            continue;
+        }
+
+        if line.contains("DirectShow audio devices") {
+            is_reading_video_devices = false;
+            is_reading_audio_devices = true;
+            continue;
+        }
+
+        let Some(quoted_value) = first_quoted_value(line) else {
+            continue;
+        };
+
+        if line.contains("Alternative name") {
+            continue;
+        }
+
+        let is_inline_video_device = directshow_inline_device_has_video(line);
+        let is_inline_audio_device = directshow_inline_device_has_audio(line);
+
+        if is_reading_audio_devices || (is_inline_audio_device && !is_inline_video_device) {
+            audio_backend_names.push(quoted_value.clone());
+            audio_devices.push(LiveCaptureAudioDevice {
+                display_name: quoted_value.clone(),
+                backend_name: quoted_value,
+            });
+            continue;
+        }
+
+        if is_reading_video_devices || is_inline_video_device {
+            let audio_backend_name = is_inline_audio_device.then(|| quoted_value.clone());
+            let audio_pin_name =
+                is_inline_audio_device.then(|| DIRECTSHOW_INTERNAL_AUDIO_PIN_NAME.to_string());
+            devices.push(LiveCaptureDevice {
+                display_name: quoted_value.clone(),
+                backend_name: quoted_value.clone(),
+                audio_backend_name,
+                audio_pin_name,
+                latency_mode: LiveCaptureLatencyMode::UltraLow,
+            });
+        }
+    }
+
+    for device in &mut devices {
+        if device.audio_backend_name.is_none() {
+            device.audio_backend_name =
+                find_directshow_audio_device_for_video(&device.display_name, &audio_backend_names);
+            device.audio_pin_name = None;
+        }
+    }
+
+    LiveCaptureDeviceScan {
+        video_devices: devices,
+        audio_devices,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn find_directshow_audio_device_for_video(
+    video_device_name: &str,
+    audio_backend_names: &[String],
+) -> Option<String> {
+    audio_backend_names
+        .iter()
+        .find(|audio_backend_name| audio_backend_name.as_str() == video_device_name)
+        .cloned()
+        .or_else(|| {
+            audio_backend_names
+                .iter()
+                .filter_map(|audio_backend_name| {
+                    let compatibility_score = directshow_device_name_compatibility_score(
+                        video_device_name,
+                        audio_backend_name,
+                    );
+                    (compatibility_score > 0).then(|| (compatibility_score, audio_backend_name))
+                })
+                .max_by_key(|(compatibility_score, _)| *compatibility_score)
+                .map(|(_, audio_backend_name)| audio_backend_name.clone())
+        })
+}
+
+#[cfg(target_os = "windows")]
+fn directshow_device_name_compatibility_score(
+    video_device_name: &str,
+    audio_device_name: &str,
+) -> usize {
+    let video_name_tokens = directshow_device_name_match_tokens(video_device_name);
+    let audio_name_tokens = directshow_device_name_match_tokens(audio_device_name);
+
+    video_name_tokens.intersection(&audio_name_tokens).count()
+}
+
+#[cfg(target_os = "windows")]
+fn directshow_device_name_match_tokens(device_name: &str) -> HashSet<String> {
+    device_name
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .map(str::to_ascii_lowercase)
+        .filter(|token| is_meaningful_directshow_device_token(token))
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
+fn is_meaningful_directshow_device_token(token: &str) -> bool {
+    const GENERIC_DIRECTSHOW_DEVICE_TOKENS: &[&str] = &[
+        "audio",
+        "camera",
+        "capture",
+        "default",
+        "device",
+        "digital",
+        "directshow",
+        "input",
+        "microphone",
+        "output",
+        "video",
+        "virtual",
+    ];
+
+    token.len() >= 4 && !GENERIC_DIRECTSHOW_DEVICE_TOKENS.contains(&token)
+}
+
+#[cfg(target_os = "windows")]
+fn directshow_inline_device_has_video(line: &str) -> bool {
+    line.contains("(video)") || line.contains("(audio, video)")
+}
+
+#[cfg(target_os = "windows")]
+fn directshow_inline_device_has_audio(line: &str) -> bool {
+    line.contains("(audio)") || line.contains("(audio, video)")
+}
+
+#[cfg(target_os = "windows")]
+fn first_quoted_value(value: &str) -> Option<String> {
+    let start_index = value.find('"')? + 1;
+    let remaining_value = &value[start_index..];
+    let end_index = remaining_value.find('"')?;
+
+    Some(remaining_value[..end_index].to_string())
+}
+
+fn directshow_capture_url(video_device_name: &str, audio_device_name: Option<&str>) -> String {
+    if let Some(audio_device_name) = audio_device_name {
+        format!("av://dshow:video={video_device_name}:audio={audio_device_name}")
+    } else {
+        format!("av://dshow:video={video_device_name}")
     }
 }
 
@@ -5880,6 +8009,26 @@ fn load_player_settings() -> PlayerSettings {
             .get("prefer_embedded_subtitles")
             .and_then(Value::as_bool)
             .unwrap_or(default_settings.prefer_embedded_subtitles),
+        audio_output_device: settings_value
+            .get("audio_output_device")
+            .and_then(Value::as_str)
+            .filter(|audio_output_device| !audio_output_device.is_empty())
+            .unwrap_or(&default_settings.audio_output_device)
+            .to_string(),
+        live_capture_audio_source: settings_value
+            .get("live_capture_audio_source")
+            .and_then(Value::as_str)
+            .filter(|live_capture_audio_source| !live_capture_audio_source.is_empty())
+            .unwrap_or(&default_settings.live_capture_audio_source)
+            .to_string(),
+        is_lowest_latency_live_capture_enabled: settings_value
+            .get("is_lowest_latency_live_capture_enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(default_settings.is_lowest_latency_live_capture_enabled),
+        is_live_capture_exclusive_audio_enabled: settings_value
+            .get("is_live_capture_exclusive_audio_enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(default_settings.is_live_capture_exclusive_audio_enabled),
         hardware_decoding_mode: settings_value
             .get("hardware_decoding_mode")
             .and_then(Value::as_str)
@@ -5889,6 +8038,10 @@ fn load_player_settings() -> PlayerSettings {
             .get("start_fullscreen")
             .and_then(Value::as_bool)
             .unwrap_or(default_settings.start_fullscreen),
+        is_backdrop_blur_enabled: settings_value
+            .get("is_backdrop_blur_enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(default_settings.is_backdrop_blur_enabled),
         subtitle_font_size: settings_value
             .get("subtitle_font_size")
             .and_then(Value::as_u64)
@@ -5922,8 +8075,13 @@ fn save_player_settings(settings: &PlayerSettings) {
         "preferred_audio_language": settings.preferred_audio_language,
         "preferred_subtitle_language": settings.preferred_subtitle_language,
         "prefer_embedded_subtitles": settings.prefer_embedded_subtitles,
+        "audio_output_device": settings.audio_output_device,
+        "live_capture_audio_source": settings.live_capture_audio_source,
+        "is_lowest_latency_live_capture_enabled": settings.is_lowest_latency_live_capture_enabled,
+        "is_live_capture_exclusive_audio_enabled": settings.is_live_capture_exclusive_audio_enabled,
         "hardware_decoding_mode": settings.hardware_decoding_mode,
         "start_fullscreen": settings.start_fullscreen,
+        "is_backdrop_blur_enabled": settings.is_backdrop_blur_enabled,
         "subtitle_font_size": settings.subtitle_font_size,
         "subtitle_color": settings.subtitle_color,
         "subtitle_position_percent": settings.subtitle_position_percent,
@@ -6059,9 +8217,60 @@ fn current_time_millis() -> u128 {
 }
 
 fn promote_recent_path(recent_paths: &mut Vec<PathBuf>, path: PathBuf, max_len: usize) {
-    recent_paths.retain(|recent_path| recent_path != &path);
+    let promoted_path_key = library_media_path_key(&path);
+    recent_paths.retain(|recent_path| library_media_path_key(recent_path) != promoted_path_key);
     recent_paths.insert(0, path);
     recent_paths.truncate(max_len);
+}
+
+fn library_media_path_key(path: &Path) -> String {
+    let normalized_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let path_key = normalized_path.display().to_string();
+
+    if cfg!(windows) {
+        path_key.replace('/', "\\").to_ascii_lowercase()
+    } else {
+        path_key
+    }
+}
+
+fn audio_output_device_label(audio_output_device: &str) -> String {
+    AUDIO_OUTPUT_DEVICE_OPTIONS
+        .iter()
+        .find(|device_option| device_option.device_id == audio_output_device)
+        .map(|device_option| device_option.label.to_string())
+        .unwrap_or_else(|| "Custom output".to_string())
+}
+
+fn on_off_label(is_enabled: bool) -> &'static str {
+    if is_enabled {
+        "On"
+    } else {
+        "Off"
+    }
+}
+
+fn on_off_message_word(is_enabled: bool) -> &'static str {
+    if is_enabled {
+        "on"
+    } else {
+        "off"
+    }
+}
+
+fn live_capture_audio_source_label(
+    live_capture_audio_source: &str,
+    live_capture_audio_devices: &[LiveCaptureAudioDevice],
+) -> String {
+    match live_capture_audio_source {
+        LIVE_CAPTURE_AUDIO_SOURCE_AUTO => "Auto".to_string(),
+        LIVE_CAPTURE_AUDIO_SOURCE_NONE => "Video only".to_string(),
+        audio_backend_name => live_capture_audio_devices
+            .iter()
+            .find(|audio_device| audio_device.backend_name == audio_backend_name)
+            .map(|audio_device| audio_device.display_name.clone())
+            .unwrap_or_else(|| "Custom audio source".to_string()),
+    }
 }
 
 fn preferred_audio_track_id(audio_tracks: &[AudioTrack], preferred_language: &str) -> Option<i64> {
@@ -6133,17 +8342,6 @@ fn language_aliases(language: &str) -> Vec<&'static str> {
         "fra" => vec!["fra", "fre", "fr", "french"],
         _ => vec![""],
     }
-}
-
-fn next_language_preference(current_language: &str) -> String {
-    match current_language {
-        "eng" => "jpn",
-        "jpn" => "spa",
-        "spa" => "fra",
-        "fra" => "any",
-        _ => "eng",
-    }
-    .to_string()
 }
 
 fn shuffled_queue_index(current_queue_index: usize, queue_len: usize) -> usize {
@@ -6528,7 +8726,7 @@ fn library_item_for_media_path(path: &Path, prefer_episode_label: bool) -> Libra
 
 fn series_library_shelves(
     library: &PlayerLibrary,
-    watched_media_paths: &HashSet<PathBuf>,
+    watched_media_path_keys: &HashSet<String>,
 ) -> Vec<LibraryShelf> {
     let mut media_paths_by_series_key: HashMap<String, Vec<PathBuf>> = HashMap::new();
     let mut display_title_by_series_key: HashMap<String, String> = HashMap::new();
@@ -6568,7 +8766,8 @@ fn series_library_shelves(
                 .take(MAX_LIBRARY_ITEMS_PER_SHELF)
                 .map(|media_path| {
                     let mut item = library_item_for_media_path(&media_path, true);
-                    item.is_watched = watched_media_paths.contains(&media_path);
+                    item.is_watched =
+                        watched_media_path_keys.contains(&library_media_path_key(&media_path));
                     item
                 })
                 .collect::<Vec<_>>();
@@ -6630,36 +8829,50 @@ fn library_series_media_paths(library: &PlayerLibrary) -> Vec<PathBuf> {
     media_paths
 }
 
-fn library_content_width(viewport_width: f32) -> f32 {
-    (viewport_width - 64.0).clamp(320.0, 1360.0)
+fn library_ui_scale(viewport_width: f32, viewport_height: f32) -> f32 {
+    let width_scale = viewport_width / LIBRARY_BASE_VIEWPORT_WIDTH_PX;
+    let height_scale = viewport_height / LIBRARY_BASE_VIEWPORT_HEIGHT_PX;
+
+    (width_scale * height_scale)
+        .sqrt()
+        .clamp(LIBRARY_MIN_UI_SCALE, LIBRARY_MAX_UI_SCALE)
 }
 
-fn library_card_width(viewport_width: f32) -> f32 {
-    let content_width = library_content_width(viewport_width);
-    let target_card_count = if content_width >= 1220.0 {
-        6.0
-    } else if content_width >= 960.0 {
-        5.0
-    } else if content_width >= 720.0 {
-        4.0
-    } else if content_width >= 500.0 {
-        3.0
-    } else {
-        2.0
-    };
-    let gap_width = 12.0 * (target_card_count - 1.0);
-
-    ((content_width - gap_width) / target_card_count).clamp(136.0, 220.0)
+fn library_content_width(viewport_width: f32, library_scale: f32) -> f32 {
+    (viewport_width - (LIBRARY_HORIZONTAL_MARGIN_PX * 2.0 * library_scale)).clamp(
+        320.0 * library_scale,
+        LIBRARY_MAX_CONTENT_WIDTH_PX * library_scale,
+    )
 }
 
-fn library_visible_card_count(viewport_width: f32) -> usize {
-    let content_width = library_content_width(viewport_width);
-    let card_width = library_card_width(viewport_width);
-    let gap_width = 12.0;
+fn library_card_width(viewport_width: f32, library_scale: f32) -> f32 {
+    let content_width = library_content_width(viewport_width, library_scale);
+    let target_card_count = library_target_card_count(content_width, library_scale);
+    let gap_width = LIBRARY_CARD_GAP_PX * library_scale * (target_card_count - 1.0);
 
-    ((content_width + gap_width) / (card_width + gap_width))
+    ((content_width - gap_width) / target_card_count).clamp(
+        LIBRARY_MIN_CARD_WIDTH_PX * library_scale,
+        LIBRARY_MAX_CARD_WIDTH_PX * library_scale,
+    )
+}
+
+fn library_visible_card_count(viewport_width: f32, library_scale: f32) -> usize {
+    let content_width = library_content_width(viewport_width, library_scale);
+    let card_width = library_card_width(viewport_width, library_scale);
+    let card_gap = LIBRARY_CARD_GAP_PX * library_scale;
+
+    ((content_width + card_gap) / (card_width + card_gap))
         .floor()
         .max(1.0) as usize
+}
+
+fn library_target_card_count(content_width: f32, library_scale: f32) -> f32 {
+    (content_width / (LIBRARY_PREFERRED_CARD_WIDTH_PX * library_scale))
+        .round()
+        .clamp(
+            LIBRARY_MIN_VISIBLE_CARD_COUNT,
+            LIBRARY_MAX_VISIBLE_CARD_COUNT,
+        )
 }
 
 fn generate_timeline_thumbnail(
@@ -6924,169 +9137,6 @@ fn hide_child_process_window(command: &mut Command) {
 #[cfg(not(target_os = "windows"))]
 fn hide_child_process_window(_command: &mut Command) {}
 
-fn discover_media_duration_seconds(media_path: &Path) -> Option<f64> {
-    let ffprobe_path = locate_dependency("ffprobe")?;
-    let mut command = Command::new(ffprobe_path);
-    command
-        .arg("-v")
-        .arg("error")
-        .arg("-show_entries")
-        .arg("format=duration")
-        .arg("-of")
-        .arg("default=noprint_wrappers=1:nokey=1")
-        .arg(media_path.as_os_str())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    hide_child_process_window(&mut command);
-
-    let output = command.output().ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse::<f64>()
-        .ok()
-        .filter(|duration_seconds| duration_seconds.is_finite() && *duration_seconds > 0.0)
-}
-
-fn discover_audio_tracks(media_path: &Path) -> Vec<AudioTrack> {
-    let Some(ffprobe_path) = locate_dependency("ffprobe") else {
-        return Vec::new();
-    };
-    let mut command = Command::new(ffprobe_path);
-    command
-        .arg("-v")
-        .arg("error")
-        .arg("-select_streams")
-        .arg("a")
-        .arg("-show_entries")
-        .arg("stream=index,codec_name:stream_tags=language,title")
-        .arg("-of")
-        .arg("json")
-        .arg(media_path.as_os_str())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    hide_child_process_window(&mut command);
-
-    let Ok(output) = command.output() else {
-        return Vec::new();
-    };
-
-    if !output.status.success() {
-        return Vec::new();
-    }
-
-    let Ok(ffprobe_output) = serde_json::from_slice::<Value>(&output.stdout) else {
-        return Vec::new();
-    };
-
-    ffprobe_output
-        .get("streams")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .enumerate()
-        .map(|(audio_index, stream)| {
-            let track_id = (audio_index + 1) as i64;
-            let tags = stream.get("tags");
-            let title = tags
-                .and_then(|tags| tags.get("title"))
-                .and_then(Value::as_str)
-                .filter(|title| !title.is_empty())
-                .map(ToString::to_string)
-                .unwrap_or_else(|| format!("Audio track {track_id}"));
-            let language = tags
-                .and_then(|tags| tags.get("language"))
-                .and_then(Value::as_str)
-                .filter(|language| !language.is_empty())
-                .map(ToString::to_string);
-            let codec = stream
-                .get("codec_name")
-                .and_then(Value::as_str)
-                .filter(|codec| !codec.is_empty())
-                .map(ToString::to_string);
-
-            AudioTrack {
-                track_id,
-                title,
-                language,
-                codec,
-            }
-        })
-        .collect()
-}
-
-fn discover_embedded_subtitle_tracks(media_path: &Path) -> Vec<EmbeddedSubtitleTrack> {
-    let Some(ffprobe_path) = locate_dependency("ffprobe") else {
-        return Vec::new();
-    };
-    let mut command = Command::new(ffprobe_path);
-    command
-        .arg("-v")
-        .arg("error")
-        .arg("-select_streams")
-        .arg("s")
-        .arg("-show_entries")
-        .arg("stream=index,codec_name:stream_tags=language,title")
-        .arg("-of")
-        .arg("json")
-        .arg(media_path.as_os_str())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    hide_child_process_window(&mut command);
-
-    let Ok(output) = command.output() else {
-        return Vec::new();
-    };
-
-    if !output.status.success() {
-        return Vec::new();
-    }
-
-    let Ok(ffprobe_output) = serde_json::from_slice::<Value>(&output.stdout) else {
-        return Vec::new();
-    };
-
-    ffprobe_output
-        .get("streams")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .enumerate()
-        .map(|(subtitle_index, stream)| {
-            let track_id = (subtitle_index + 1) as i64;
-            let tags = stream.get("tags");
-            let title = tags
-                .and_then(|tags| tags.get("title"))
-                .and_then(Value::as_str)
-                .filter(|title| !title.is_empty())
-                .map(ToString::to_string)
-                .unwrap_or_else(|| format!("Subtitle track {track_id}"));
-            let language = tags
-                .and_then(|tags| tags.get("language"))
-                .and_then(Value::as_str)
-                .filter(|language| !language.is_empty())
-                .map(ToString::to_string);
-            let codec = stream
-                .get("codec_name")
-                .and_then(Value::as_str)
-                .filter(|codec| !codec.is_empty())
-                .map(ToString::to_string);
-
-            EmbeddedSubtitleTrack {
-                track_id,
-                title,
-                language,
-                codec,
-                is_selected: false,
-            }
-        })
-        .collect()
-}
-
 fn embedded_subtitle_detail(subtitle_track: &EmbeddedSubtitleTrack) -> String {
     let mut details = Vec::new();
 
@@ -7189,6 +9239,7 @@ fn icon_path(icon_file_name: &str) -> SharedString {
 
 fn run_application() {
     let initial_media_paths = initial_media_paths_from_args();
+    let initial_player_settings = load_player_settings();
 
     application().run(move |cx: &mut App| {
         cx.bind_keys([
@@ -7217,7 +9268,7 @@ fn run_application() {
                     title: Some(APP_NAME.into()),
                     ..Default::default()
                 }),
-                window_background: WindowBackgroundAppearance::Transparent,
+                window_background: initial_player_settings.window_background_appearance(),
                 app_id: Some(APP_ID.to_string()),
                 focus: true,
                 ..Default::default()

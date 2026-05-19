@@ -6,6 +6,7 @@ $ErrorActionPreference = "Stop"
 
 $AppName = "Watch"
 $ExecutableName = "Watch.exe"
+$ApplicationProgId = "Watch.VideoFile"
 $StartMenuProgramsDirectory = [Environment]::GetFolderPath([Environment+SpecialFolder]::Programs)
 if ([string]::IsNullOrWhiteSpace($StartMenuProgramsDirectory)) {
     $StartMenuProgramsDirectory = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs"
@@ -18,9 +19,12 @@ $VideoExtensions = @(
 foreach ($VideoExtension in $VideoExtensions) {
     $Extension = ".$VideoExtension"
     Remove-Item -Path "HKCU:\Software\Classes\SystemFileAssociations\$Extension\shell\OpenWithWatch" -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-ItemProperty -Path "HKCU:\Software\Classes\$Extension\OpenWithProgids" -Name $ApplicationProgId -Force -ErrorAction SilentlyContinue
 }
 
+Remove-ItemProperty -Path "HKCU:\Software\RegisteredApplications" -Name $AppName -Force -ErrorAction SilentlyContinue
 Remove-Item -Path "HKCU:\Software\Classes\Applications\$ExecutableName" -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item -Path "HKCU:\Software\Classes\$ApplicationProgId" -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\App Paths\$ExecutableName" -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Watch" -Recurse -Force -ErrorAction SilentlyContinue
 

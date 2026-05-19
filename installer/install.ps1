@@ -6,6 +6,7 @@ $ErrorActionPreference = "Stop"
 
 $AppName = "Watch"
 $ExecutableName = "Watch.exe"
+$ApplicationProgId = "Watch.VideoFile"
 $SourceDirectory = Split-Path -Parent $PSCommandPath
 $InstallIconDirectory = Join-Path $InstallDirectory "icons"
 $ExecutablePath = Join-Path $InstallDirectory $ExecutableName
@@ -55,9 +56,21 @@ Get-ChildItem -LiteralPath $SourceDirectory -Filter "*.svg" | ForEach-Object {
 
 $OpenCommand = "`"$ExecutablePath`" `"%1`""
 $ApplicationRegistryPath = "HKCU:\Software\Classes\Applications\$ExecutableName"
+$ProgIdRegistryPath = "HKCU:\Software\Classes\$ApplicationProgId"
+$RegisteredApplicationsRegistryPath = "HKCU:\Software\RegisteredApplications"
+$CapabilitiesRegistryPath = "$ApplicationRegistryPath\Capabilities"
 Set-RegistryString -Path $ApplicationRegistryPath -Name "FriendlyAppName" -Value $AppName
 Set-RegistryString -Path "$ApplicationRegistryPath\DefaultIcon" -Name "" -Value "`"$ExecutablePath`",0"
 Set-RegistryString -Path "$ApplicationRegistryPath\shell\open\command" -Name "" -Value $OpenCommand
+Set-RegistryString -Path $CapabilitiesRegistryPath -Name "ApplicationName" -Value $AppName
+Set-RegistryString -Path $CapabilitiesRegistryPath -Name "ApplicationDescription" -Value "Minimal OLED dark mode media player"
+Set-RegistryString -Path $CapabilitiesRegistryPath -Name "ApplicationIcon" -Value "`"$ExecutablePath`",0"
+Set-RegistryString -Path $RegisteredApplicationsRegistryPath -Name $AppName -Value "Software\Classes\Applications\$ExecutableName\Capabilities"
+
+Set-RegistryString -Path $ProgIdRegistryPath -Name "" -Value "$AppName Video File"
+Set-RegistryString -Path $ProgIdRegistryPath -Name "FriendlyTypeName" -Value "$AppName Video File"
+Set-RegistryString -Path "$ProgIdRegistryPath\DefaultIcon" -Name "" -Value "`"$ExecutablePath`",0"
+Set-RegistryString -Path "$ProgIdRegistryPath\shell\open\command" -Name "" -Value $OpenCommand
 
 $ApplicationPathRegistryPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\App Paths\$ExecutableName"
 Set-RegistryString -Path $ApplicationPathRegistryPath -Name "" -Value $ExecutablePath
@@ -66,6 +79,8 @@ Set-RegistryString -Path $ApplicationPathRegistryPath -Name "Path" -Value $Insta
 foreach ($VideoExtension in $VideoExtensions) {
     $Extension = ".$VideoExtension"
     Set-RegistryString -Path "$ApplicationRegistryPath\SupportedTypes" -Name $Extension -Value ""
+    Set-RegistryString -Path "$CapabilitiesRegistryPath\FileAssociations" -Name $Extension -Value $ApplicationProgId
+    Set-RegistryString -Path "HKCU:\Software\Classes\$Extension\OpenWithProgids" -Name $ApplicationProgId -Value ""
 
     $ContextMenuPath = "HKCU:\Software\Classes\SystemFileAssociations\$Extension\shell\OpenWithWatch"
     Set-RegistryString -Path $ContextMenuPath -Name "" -Value "Open with Watch"
@@ -105,3 +120,4 @@ if (Get-Command ie4uinit.exe -ErrorAction SilentlyContinue) {
 
 Write-Host "Watch installed to $InstallDirectory"
 Write-Host "Start Menu shortcut created at $StartMenuShortcutPath"
+Write-Host "Watch registered for Open With and Windows Default Apps. Choose Watch in Windows Settings to make it the default for a video type."

@@ -26,7 +26,7 @@ Playback is backed by `mpv` and the UI polls mpv IPC for real position, duration
 - Build the app and Windows installer with `cargo build --release`
 - The release build writes the distributable installer to `dist\WatchSetup.exe` shortly after linking finishes. Packaging details are written to `dist\cargo-release-distribution.log`.
 - You can still rebuild the installer directly with `powershell -NoProfile -ExecutionPolicy Bypass -File installer\build-installer.ps1`.
-- The installer registers `Open with Watch` for supported video files under the current Windows user.
+- The installer registers `Open with Watch` and makes Watch appear as a Windows Default Apps candidate for supported video files under the current Windows user. Windows still requires the user to choose Watch as the default in Settings.
 - Optional portable dependencies can be placed under `tools\mpv` and `tools\ffmpeg`; the installer will bundle them when present. Without that, Watch looks for `mpv`, `ffprobe`, and `ffmpeg` on `PATH` and shows a setup message if required playback/probing tools are missing.
 
 ## Hotkeys
