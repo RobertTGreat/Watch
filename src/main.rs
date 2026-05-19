@@ -1,13 +1,13 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 use std::{
-    collections::{hash_map::DefaultHasher, HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     ffi::OsStr,
     fs::{self, OpenOptions},
-    hash::{Hash, Hasher},
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
+    sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -24,6 +24,7 @@ use gpui::{
 };
 use gpui_platform::application;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 #[cfg(target_os = "windows")]
@@ -41,12 +42,13 @@ use windows_sys::Win32::{
 const OLED_BLACK: u32 = 0x000000;
 const APP_NAME: &str = "Watch";
 const APP_ID: &str = "Watch";
+const WATCH_PLAYER_KEY_CONTEXT: &str = "WatchPlayer";
 const PLAYER_BLACK: u32 = 0x030303;
 const MENU_BLACK: u32 = 0x080808;
 const SOFT_WHITE: u32 = 0xf5f5f5;
 const MUTED_TEXT: u32 = 0x9a9a9a;
-const FINE_BORDER: u32 = 0x242424;
-const BRIGHT_BORDER: u32 = 0x6a6a6a;
+const FINE_BORDER: u32 = 0x101010;
+const BRIGHT_BORDER: u32 = 0x202020;
 const VLC_ORANGE: u32 = 0xff8a2a;
 const BACKDROP_BLUR_BASE_BACKGROUND_ALPHA: f32 = 0.82;
 const BACKDROP_BLUR_VIDEO_SURFACE_ALPHA: f32 = 0.88;
@@ -95,13 +97,15 @@ const MAX_LIBRARY_THUMBNAILS_TO_GENERATE: usize = 12;
 const LIBRARY_TITLE_LINE_HEIGHT_PX: f32 = 18.0;
 const LIBRARY_TITLE_AVERAGE_CHARACTER_WIDTH_PX: f32 = 7.2;
 const LIBRARY_TITLE_SCROLL_END_PADDING_PX: f32 = 24.0;
-const VOLUME_SLIDER_SEGMENT_COUNT: usize = 101;
 const VOLUME_SLIDER_WIDTH: f32 = 142.0;
 const MAIN_MENU_WIDTH: f32 = 320.0;
 const CONTEXT_MENU_WIDTH: f32 = 300.0;
 const LIBRARY_CONTEXT_MENU_WIDTH: f32 = 220.0;
 const LIBRARY_CONTEXT_MENU_ESTIMATED_HEIGHT: f32 = 48.0;
 const SETTINGS_MODAL_WIDTH: f32 = 480.0;
+const LIVE_CAPTURE_DROPDOWN_WIDTH: f32 = 360.0;
+const LIBRARY_ACTION_GROUP_ESTIMATED_WIDTH: f32 = 448.0;
+const LIBRARY_LIVE_CAPTURE_OVERLAY_TOP: f32 = 74.0;
 const MENU_RIGHT_MARGIN: f32 = 16.0;
 const MAIN_MENU_CLICKOFF_SAFE_COLUMN_WIDTH: f32 = MAIN_MENU_WIDTH + (MENU_RIGHT_MARGIN * 2.0);
 const CONTEXT_MENU_OFFSET: f32 = 8.0;
@@ -111,8 +115,8 @@ const CONTINUE_WATCHING_PROMPT_WIDTH: f32 = 340.0;
 const MINIMUM_RESUME_POSITION_SECONDS: f64 = 1.0;
 const COMPLETED_MEDIA_REMAINING_SECONDS: f64 = 90.0;
 const COMPLETED_MEDIA_FRACTION: f64 = 0.92;
-const SEEK_STEP_SECONDS: f64 = 5.0;
-const VOLUME_STEP_PERCENT: i16 = 5;
+const DEFAULT_SEEK_STEP_SECONDS: f64 = 5.0;
+const DEFAULT_VOLUME_STEP_PERCENT: i16 = 5;
 const SPEED_STEP: f64 = 0.1;
 const DEFAULT_VOLUME_PERCENT: u8 = 64;
 const MAX_RECENT_MEDIA: usize = 24;
@@ -125,6 +129,9 @@ const WATCH_SESSION_FILE_NAME: &str = "watch-session.json";
 const WATCH_SETTINGS_FILE_NAME: &str = "watch-settings.json";
 const WATCH_LIBRARY_FILE_NAME: &str = "watch-library.json";
 const THUMBNAIL_CACHE_DIRECTORY_NAME: &str = "timeline-thumbnails";
+const LIBRARY_FLUSH_INTERVAL_MS: u128 = 5_000;
+const THUMBNAIL_CACHE_MAX_BYTES: u64 = 512 * 1024 * 1024;
+const THUMBNAIL_WORKER_COUNT: usize = 2;
 const ICON_PLAY: &str = "play.svg";
 const ICON_PAUSE: &str = "pause.svg";
 const ICON_NEXT: &str = "next.svg";
@@ -144,33 +151,6 @@ const ICON_CHEVRON_DOWN: &str = "chevron-down.svg";
 const ICON_EYE: &str = "eye.svg";
 const ICON_X: &str = "x.svg";
 
-const AUDIO_OUTPUT_DEVICE_OPTIONS: &[AudioOutputDeviceOption] = &[
-    AudioOutputDeviceOption {
-        label: "Auto",
-        device_id: AUDIO_OUTPUT_AUTO_DEVICE_ID,
-    },
-    AudioOutputDeviceOption {
-        label: "Corsair headset",
-        device_id: "wasapi/{d159af60-9aaa-450d-b790-de54421dcf35}",
-    },
-    AudioOutputDeviceOption {
-        label: "LG ULTRAGEAR",
-        device_id: "wasapi/{03f1f99e-7b9d-405e-bf61-8ed0d53ffb8a}",
-    },
-    AudioOutputDeviceOption {
-        label: "MAG monitor",
-        device_id: "wasapi/{02aff3bc-b2e1-4044-b3b6-a379b71151b2}",
-    },
-    AudioOutputDeviceOption {
-        label: "Beyond TV",
-        device_id: "wasapi/{52e9b06b-4cdb-48aa-8b6a-d686bf34a5d8}",
-    },
-    AudioOutputDeviceOption {
-        label: "Realtek Digital Output",
-        device_id: "wasapi/{58b20d2c-999a-40a0-adc6-f42bbfc94323}",
-    },
-];
-
 const VIDEO_EXTENSIONS: [&str; 20] = [
     "mkv", "mp4", "mov", "m4v", "3gp", "avi", "wmv", "asf", "ogm", "ogg", "flv", "webm", "mxf",
     "mpeg", "mpg", "m2ts", "ts", "vob", "divx", "dv",
@@ -178,11 +158,47 @@ const VIDEO_EXTENSIONS: [&str; 20] = [
 const SUBTITLE_EXTENSIONS: [&str; 13] = [
     "srt", "ass", "ssa", "sub", "idx", "vtt", "smi", "sami", "txt", "usf", "mpl", "mpsub", "jss",
 ];
+const PLAYLIST_EXTENSIONS: [&str; 2] = ["m3u", "m3u8"];
+const MPV_POLL_PROPERTIES: &[&str] = &[
+    "time-pos",
+    "duration",
+    "pause",
+    "eof-reached",
+    "volume",
+    "mute",
+    "speed",
+    "aid",
+    "sid",
+    "track-list",
+    "chapter-list",
+    "chapter",
+];
 
 actions!(
-    oled_vlc_player,
+    watch_player,
     [
         TogglePlayback,
+        ToggleMute,
+        ToggleFullscreen,
+        PreviousQueueItem,
+        NextQueueItem,
+        FrameStepBackward,
+        FrameStepForward,
+        SetABLoopA,
+        SetABLoopB,
+        ClearABLoop,
+        SeekPreviousChapter,
+        SeekNextChapter,
+        JumpToPercent0,
+        JumpToPercent1,
+        JumpToPercent2,
+        JumpToPercent3,
+        JumpToPercent4,
+        JumpToPercent5,
+        JumpToPercent6,
+        JumpToPercent7,
+        JumpToPercent8,
+        JumpToPercent9,
         IncreaseSubtitleDelay,
         DecreaseSubtitleDelay,
         ResetSubtitleDelay,
@@ -199,8 +215,8 @@ actions!(
 
 #[derive(Clone)]
 struct AudioOutputDeviceOption {
-    label: &'static str,
-    device_id: &'static str,
+    label: String,
+    device_id: String,
 }
 
 #[derive(Clone)]
@@ -505,7 +521,8 @@ impl PlaybackRepeatMode {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 enum ResumeBehavior {
     Ask,
     Always,
@@ -520,41 +537,62 @@ impl ResumeBehavior {
             Self::Never => "Never",
         }
     }
+}
 
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Ask => "ask",
-            Self::Always => "always",
-            Self::Never => "never",
-        }
-    }
-
-    fn from_str(value: &str) -> Self {
-        match value {
-            "always" => Self::Always,
-            "never" => Self::Never,
-            _ => Self::Ask,
-        }
+impl Default for ResumeBehavior {
+    fn default() -> Self {
+        Self::Ask
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct SavedWindowBounds {
+    width: f32,
+    height: f32,
+    x: Option<f32>,
+    y: Option<f32>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 struct PlayerSettings {
+    #[serde(default = "default_volume_percent")]
     default_volume_percent: u8,
+    #[serde(default)]
     resume_behavior: ResumeBehavior,
+    #[serde(default = "default_preferred_audio_language")]
     preferred_audio_language: String,
+    #[serde(default = "default_preferred_subtitle_language")]
     preferred_subtitle_language: String,
+    #[serde(default = "default_prefer_embedded_subtitles")]
     prefer_embedded_subtitles: bool,
+    #[serde(default = "default_audio_output_device")]
     audio_output_device: String,
+    #[serde(default = "default_live_capture_audio_source")]
     live_capture_audio_source: String,
+    #[serde(default = "default_lowest_latency_live_capture_enabled")]
     is_lowest_latency_live_capture_enabled: bool,
+    #[serde(default)]
     is_live_capture_exclusive_audio_enabled: bool,
+    #[serde(default = "default_hardware_decoding_mode")]
     hardware_decoding_mode: String,
+    #[serde(default)]
     start_fullscreen: bool,
+    #[serde(default)]
     is_backdrop_blur_enabled: bool,
+    #[serde(default = "default_subtitle_font_size")]
     subtitle_font_size: u8,
+    #[serde(default = "default_subtitle_color")]
     subtitle_color: String,
+    #[serde(default = "default_subtitle_position_percent")]
     subtitle_position_percent: u8,
+    #[serde(default = "default_seek_step_seconds")]
+    seek_step_seconds: f64,
+    #[serde(default = "default_volume_step_percent")]
+    volume_step_percent: i16,
+    #[serde(default)]
+    window_bounds: Option<SavedWindowBounds>,
+    #[serde(default)]
+    schema_version: u32,
 }
 
 impl Default for PlayerSettings {
@@ -575,6 +613,10 @@ impl Default for PlayerSettings {
             subtitle_font_size: 48,
             subtitle_color: "#FFFFFF".to_string(),
             subtitle_position_percent: 95,
+            seek_step_seconds: DEFAULT_SEEK_STEP_SECONDS,
+            volume_step_percent: DEFAULT_VOLUME_STEP_PERCENT,
+            window_bounds: None,
+            schema_version: 1,
         }
     }
 }
@@ -597,6 +639,58 @@ impl PlayerSettings {
     }
 }
 
+fn default_volume_percent() -> u8 {
+    DEFAULT_VOLUME_PERCENT
+}
+
+fn default_preferred_audio_language() -> String {
+    "eng".to_string()
+}
+
+fn default_preferred_subtitle_language() -> String {
+    "eng".to_string()
+}
+
+fn default_prefer_embedded_subtitles() -> bool {
+    true
+}
+
+fn default_audio_output_device() -> String {
+    AUDIO_OUTPUT_AUTO_DEVICE_ID.to_string()
+}
+
+fn default_live_capture_audio_source() -> String {
+    LIVE_CAPTURE_AUDIO_SOURCE_AUTO.to_string()
+}
+
+fn default_lowest_latency_live_capture_enabled() -> bool {
+    true
+}
+
+fn default_hardware_decoding_mode() -> String {
+    "auto-safe".to_string()
+}
+
+fn default_subtitle_font_size() -> u8 {
+    48
+}
+
+fn default_subtitle_color() -> String {
+    "#FFFFFF".to_string()
+}
+
+fn default_subtitle_position_percent() -> u8 {
+    95
+}
+
+fn default_seek_step_seconds() -> f64 {
+    DEFAULT_SEEK_STEP_SECONDS
+}
+
+fn default_volume_step_percent() -> i16 {
+    DEFAULT_VOLUME_STEP_PERCENT
+}
+
 #[derive(Clone)]
 struct MediaHistoryEntry {
     path: PathBuf,
@@ -604,12 +698,16 @@ struct MediaHistoryEntry {
     duration_seconds: Option<f64>,
     is_completed: bool,
     updated_at_millis: u128,
+    selected_audio_track_id: Option<i64>,
+    selected_embedded_subtitle_track_id: Option<i64>,
+    selected_subtitle_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Default)]
 struct PlayerLibrary {
     recent_media_paths: Vec<PathBuf>,
     recent_folder_paths: Vec<PathBuf>,
+    pinned_folder_paths: Vec<PathBuf>,
     media_history: Vec<MediaHistoryEntry>,
 }
 
@@ -632,6 +730,27 @@ struct LibraryShelf {
     subtitle: Option<String>,
     empty_message: &'static str,
     items: Vec<LibraryGridItem>,
+}
+
+#[derive(Clone, Default)]
+struct LibraryViewModel {
+    shelves: Vec<LibraryShelf>,
+    generation: u64,
+}
+
+#[allow(dead_code)]
+#[derive(Clone)]
+struct Chapter {
+    title: String,
+    time_seconds: f64,
+}
+
+#[allow(dead_code)]
+#[derive(Clone)]
+struct FolderListingCacheEntry {
+    folder_path: PathBuf,
+    modified_millis: u128,
+    media_paths: Vec<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -696,6 +815,8 @@ struct MpvPlaybackSnapshot {
     playback_speed: Option<f64>,
     audio_track_id: Option<i64>,
     subtitle_track_id: Option<i64>,
+    chapters: Vec<Chapter>,
+    current_chapter_index: Option<usize>,
     audio_tracks: Vec<AudioTrack>,
     embedded_subtitle_tracks: Vec<EmbeddedSubtitleTrack>,
 }
@@ -712,6 +833,8 @@ enum ContextMenuSection {
 enum SettingsSelectorKind {
     AudioOutput,
     ResumeBehavior,
+    SeekStep,
+    VolumeStep,
     PreferredAudioLanguage,
     PreferredSubtitleLanguage,
     HardwareDecoding,
@@ -726,6 +849,8 @@ impl SettingsSelectorKind {
         match self {
             Self::AudioOutput => "Audio Output",
             Self::ResumeBehavior => "Resume",
+            Self::SeekStep => "Seek Step",
+            Self::VolumeStep => "Volume Step",
             Self::PreferredAudioLanguage => "Audio Language",
             Self::PreferredSubtitleLanguage => "Subtitle Language",
             Self::HardwareDecoding => "Hardware Decode",
@@ -741,6 +866,8 @@ impl SettingsSelectorKind {
 enum SettingsSelectorChoice {
     AudioOutputDevice(String),
     ResumeBehavior(ResumeBehavior),
+    SeekStepSeconds(f64),
+    VolumeStepPercent(i16),
     PreferredAudioLanguage(String),
     PreferredSubtitleLanguage(String),
     HardwareDecodingMode(String),
@@ -768,6 +895,13 @@ struct SavedWatchSession {
     is_muted: bool,
 }
 
+#[derive(Default)]
+struct StartupOptions {
+    media_paths: Vec<PathBuf>,
+    start_fullscreen: Option<bool>,
+    resume_behavior: Option<ResumeBehavior>,
+}
+
 #[cfg(target_os = "windows")]
 struct EmbeddedVideoHost {
     window_id: isize,
@@ -777,13 +911,15 @@ struct EmbeddedVideoHost {
 #[cfg(not(target_os = "windows"))]
 struct EmbeddedVideoHost;
 
-struct OledVlcPlayer {
+struct WatchPlayer {
     focus_handle: FocusHandle,
     playback_queue: Vec<LoadedMedia>,
     current_queue_index: Option<usize>,
     selected_audio_track_id: Option<i64>,
     selected_subtitle_path: Option<PathBuf>,
     selected_embedded_subtitle_track_id: Option<i64>,
+    chapters: Vec<Chapter>,
+    current_chapter_index: Option<usize>,
     is_playing: bool,
     is_eof_reached: bool,
     playback_position_seconds: f64,
@@ -793,6 +929,7 @@ struct OledVlcPlayer {
     is_muted: bool,
     subtitle_delay_ms: i32,
     is_shuffle_enabled: bool,
+    shuffle_bag: Vec<usize>,
     repeat_mode: PlaybackRepeatMode,
     are_controls_visible: bool,
     is_pointer_over_player_overlay: bool,
@@ -806,6 +943,8 @@ struct OledVlcPlayer {
     is_library_open: bool,
     is_live_capture_menu_open: bool,
     is_live_capture_scan_pending: bool,
+    is_audio_output_scan_pending: bool,
+    show_unwatched_only: bool,
     open_settings_selector: Option<SettingsSelectorKind>,
     subtitle_menu_anchor: Option<Point<Pixels>>,
     library_context_menu_anchor: Option<Point<Pixels>>,
@@ -820,6 +959,14 @@ struct OledVlcPlayer {
     pending_watch_session: Option<SavedWatchSession>,
     settings: PlayerSettings,
     library: PlayerLibrary,
+    is_library_dirty: bool,
+    last_library_flush_millis: u128,
+    last_recorded_progress_seconds: f64,
+    last_window_bounds_flush_millis: u128,
+    library_generation: u64,
+    library_view_model: LibraryViewModel,
+    folder_listing_cache: HashMap<String, FolderListingCacheEntry>,
+    audio_output_devices: Vec<AudioOutputDeviceOption>,
     live_capture_devices: Vec<LiveCaptureDevice>,
     live_capture_audio_devices: Vec<LiveCaptureAudioDevice>,
     library_shelf_offsets: HashMap<String, usize>,
@@ -837,7 +984,7 @@ struct OledVlcPlayer {
     playback_log_path: Option<PathBuf>,
 }
 
-impl OledVlcPlayer {
+impl WatchPlayer {
     fn new(initial_media_paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let settings = load_player_settings();
         window.set_background_appearance(settings.window_background_appearance());
@@ -849,9 +996,12 @@ impl OledVlcPlayer {
                 None
             }
         };
-        let status_message = dependency_status.setup_message().unwrap_or_else(|| {
-            "Open a real media file or folder to populate the player.".to_string()
-        });
+        let status_message = platform_support_message()
+            .map(ToString::to_string)
+            .or_else(|| dependency_status.setup_message())
+            .unwrap_or_else(|| {
+                "Open a real media file or folder to populate the player.".to_string()
+            });
         let mut player = Self {
             focus_handle: cx.focus_handle(),
             playback_queue: Vec::new(),
@@ -859,6 +1009,8 @@ impl OledVlcPlayer {
             selected_audio_track_id: None,
             selected_subtitle_path: None,
             selected_embedded_subtitle_track_id: None,
+            chapters: Vec::new(),
+            current_chapter_index: None,
             is_playing: false,
             is_eof_reached: false,
             playback_position_seconds: 0.0,
@@ -868,6 +1020,7 @@ impl OledVlcPlayer {
             is_muted: false,
             subtitle_delay_ms: 0,
             is_shuffle_enabled: false,
+            shuffle_bag: Vec::new(),
             repeat_mode: PlaybackRepeatMode::Off,
             are_controls_visible: true,
             is_pointer_over_player_overlay: false,
@@ -881,6 +1034,8 @@ impl OledVlcPlayer {
             is_library_open: initial_media_paths.is_empty(),
             is_live_capture_menu_open: false,
             is_live_capture_scan_pending: false,
+            is_audio_output_scan_pending: false,
+            show_unwatched_only: false,
             open_settings_selector: None,
             subtitle_menu_anchor: None,
             library_context_menu_anchor: None,
@@ -895,6 +1050,14 @@ impl OledVlcPlayer {
             pending_watch_session,
             settings,
             library: load_player_library(),
+            is_library_dirty: false,
+            last_library_flush_millis: current_time_millis(),
+            last_recorded_progress_seconds: 0.0,
+            last_window_bounds_flush_millis: current_time_millis(),
+            library_generation: 1,
+            library_view_model: LibraryViewModel::default(),
+            folder_listing_cache: HashMap::new(),
+            audio_output_devices: default_audio_output_options(),
             live_capture_devices: Vec::new(),
             live_capture_audio_devices: Vec::new(),
             library_shelf_offsets: HashMap::new(),
@@ -924,6 +1087,8 @@ impl OledVlcPlayer {
         if player.is_library_open {
             player.schedule_library_thumbnail_generation(window, cx);
         }
+        player.refresh_audio_output_devices(window, cx);
+        prune_thumbnail_cache();
         player.schedule_controls_hide(window, cx);
         player
     }
@@ -1006,6 +1171,10 @@ impl OledVlcPlayer {
         }
     }
 
+    fn mark_library_dirty(&mut self) {
+        self.library_generation = self.library_generation.wrapping_add(1);
+    }
+
     fn record_current_media_progress(&mut self) {
         let Some(current_media_path) = self.current_media_path() else {
             return;
@@ -1033,6 +1202,9 @@ impl OledVlcPlayer {
                 duration_seconds,
                 is_completed,
                 updated_at_millis,
+                selected_audio_track_id: self.selected_audio_track_id,
+                selected_embedded_subtitle_track_id: self.selected_embedded_subtitle_track_id,
+                selected_subtitle_path: self.selected_subtitle_path.clone(),
             },
         );
         self.library.media_history.truncate(MAX_RECENT_MEDIA * 2);
@@ -1041,7 +1213,25 @@ impl OledVlcPlayer {
             current_media_path,
             MAX_RECENT_MEDIA,
         );
-        save_player_library(&self.library);
+        self.is_library_dirty = true;
+        self.last_recorded_progress_seconds = playback_position_seconds;
+        self.mark_library_dirty();
+    }
+
+    fn flush_player_library_if_due(&mut self, force: bool) {
+        if !self.is_library_dirty {
+            return;
+        }
+
+        let now = current_time_millis();
+        let is_due =
+            now.saturating_sub(self.last_library_flush_millis) >= LIBRARY_FLUSH_INTERVAL_MS;
+
+        if force || is_due {
+            save_player_library_atomic(&self.library);
+            self.last_library_flush_millis = now;
+            self.is_library_dirty = false;
+        }
     }
 
     fn remember_current_queue_in_library(&mut self) {
@@ -1066,7 +1256,8 @@ impl OledVlcPlayer {
             }
         }
 
-        save_player_library(&self.library);
+        self.mark_library_dirty();
+        save_player_library_atomic(&self.library);
     }
 
     fn selected_audio_track_label(&self) -> String {
@@ -1137,8 +1328,13 @@ impl OledVlcPlayer {
     }
 
     fn set_playback_position_seconds(&mut self, position_seconds: f64) {
-        let max_position_seconds = self.current_media_duration_seconds().unwrap_or(0.0);
-        self.playback_position_seconds = position_seconds.clamp(0.0, max_position_seconds);
+        let position_seconds = position_seconds.max(0.0);
+        self.playback_position_seconds =
+            if let Some(duration_seconds) = self.current_media_duration_seconds() {
+                position_seconds.clamp(0.0, duration_seconds)
+            } else {
+                position_seconds
+            };
     }
 
     fn schedule_playback_state_poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1238,6 +1434,8 @@ impl OledVlcPlayer {
                 }
             }
         }
+        self.chapters = playback_snapshot.chapters;
+        self.current_chapter_index = playback_snapshot.current_chapter_index;
 
         let is_eof_reached = playback_snapshot.is_eof_reached.unwrap_or(false);
         if is_eof_reached && !self.is_eof_reached {
@@ -1250,6 +1448,7 @@ impl OledVlcPlayer {
         }
 
         self.record_current_media_progress();
+        self.flush_player_library_if_due(false);
         false
     }
 
@@ -1324,6 +1523,7 @@ impl OledVlcPlayer {
     fn handle_end_of_current_media(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.is_playing = false;
         self.record_current_media_progress();
+        self.flush_player_library_if_due(true);
 
         if self.repeat_mode == PlaybackRepeatMode::One {
             self.show_osd("Repeat one".to_string(), window, cx);
@@ -1581,11 +1781,11 @@ impl OledVlcPlayer {
     }
 
     fn seek_backward(&mut self, _: &SeekBackward, window: &mut Window, cx: &mut Context<Self>) {
-        self.seek_relative_seconds(-SEEK_STEP_SECONDS, window, cx);
+        self.seek_relative_seconds(-self.settings.seek_step_seconds, window, cx);
     }
 
     fn seek_forward(&mut self, _: &SeekForward, window: &mut Window, cx: &mut Context<Self>) {
-        self.seek_relative_seconds(SEEK_STEP_SECONDS, window, cx);
+        self.seek_relative_seconds(self.settings.seek_step_seconds, window, cx);
     }
 
     fn update_timeline_hover_preview(
@@ -1683,6 +1883,7 @@ impl OledVlcPlayer {
     fn stop_current_playback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.playback_progress_generation += 1;
         self.record_current_media_progress();
+        self.flush_player_library_if_due(true);
         self.stop_playback_process();
         self.is_playing = false;
         self.playback_position_seconds = 0.0;
@@ -1696,8 +1897,20 @@ impl OledVlcPlayer {
     }
 
     fn toggle_window_fullscreen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !window.is_fullscreen() {
+            self.save_current_window_bounds(window);
+        }
         window.toggle_fullscreen();
         self.reveal_controls(window, cx);
+    }
+
+    fn toggle_fullscreen(
+        &mut self,
+        _: &ToggleFullscreen,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_window_fullscreen(window, cx);
     }
 
     fn should_toggle_fullscreen_from_video_double_click(
@@ -1730,6 +1943,10 @@ impl OledVlcPlayer {
         self.reveal_controls(window, cx);
     }
 
+    fn toggle_mute_action(&mut self, _: &ToggleMute, window: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_mute(window, cx);
+    }
+
     fn change_volume_by(&mut self, volume_delta: i16, window: &mut Window, cx: &mut Context<Self>) {
         let current_volume = i16::from(self.volume_percent);
         let next_volume = (current_volume + volume_delta).clamp(0, 100) as u8;
@@ -1737,11 +1954,193 @@ impl OledVlcPlayer {
     }
 
     fn increase_volume(&mut self, _: &VolumeUp, window: &mut Window, cx: &mut Context<Self>) {
-        self.change_volume_by(VOLUME_STEP_PERCENT, window, cx);
+        self.change_volume_by(self.settings.volume_step_percent, window, cx);
     }
 
     fn decrease_volume(&mut self, _: &VolumeDown, window: &mut Window, cx: &mut Context<Self>) {
-        self.change_volume_by(-VOLUME_STEP_PERCENT, window, cx);
+        self.change_volume_by(-self.settings.volume_step_percent, window, cx);
+    }
+
+    fn previous_queue_item(
+        &mut self,
+        _: &PreviousQueueItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.play_previous_queue_item(window, cx);
+    }
+
+    fn next_queue_item(&mut self, _: &NextQueueItem, window: &mut Window, cx: &mut Context<Self>) {
+        self.play_next_queue_item(window, cx);
+    }
+
+    fn frame_step_forward(
+        &mut self,
+        _: &FrameStepForward,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.send_mpv_command(json!(["frame-step"]));
+        self.show_osd("Frame forward".to_string(), window, cx);
+        self.reveal_controls(window, cx);
+    }
+
+    fn frame_step_backward(
+        &mut self,
+        _: &FrameStepBackward,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.send_mpv_command(json!(["frame-back-step"]));
+        self.show_osd("Frame back".to_string(), window, cx);
+        self.reveal_controls(window, cx);
+    }
+
+    fn set_ab_loop_a(&mut self, _: &SetABLoopA, window: &mut Window, cx: &mut Context<Self>) {
+        self.send_mpv_command(json!([
+            "set_property",
+            "ab-loop-a",
+            self.playback_position_seconds
+        ]));
+        self.show_osd("A-B loop: A set".to_string(), window, cx);
+        self.reveal_controls(window, cx);
+    }
+
+    fn set_ab_loop_b(&mut self, _: &SetABLoopB, window: &mut Window, cx: &mut Context<Self>) {
+        self.send_mpv_command(json!([
+            "set_property",
+            "ab-loop-b",
+            self.playback_position_seconds
+        ]));
+        self.show_osd("A-B loop: B set".to_string(), window, cx);
+        self.reveal_controls(window, cx);
+    }
+
+    fn clear_ab_loop(&mut self, _: &ClearABLoop, window: &mut Window, cx: &mut Context<Self>) {
+        self.send_mpv_command(json!(["set_property", "ab-loop-a", "no"]));
+        self.send_mpv_command(json!(["set_property", "ab-loop-b", "no"]));
+        self.show_osd("A-B loop cleared".to_string(), window, cx);
+        self.reveal_controls(window, cx);
+    }
+
+    fn seek_to_next_chapter(
+        &mut self,
+        _: &SeekNextChapter,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.send_mpv_command(json!(["add", "chapter", 1]));
+        self.show_osd("Next chapter".to_string(), window, cx);
+        self.reveal_controls(window, cx);
+    }
+
+    fn seek_to_previous_chapter(
+        &mut self,
+        _: &SeekPreviousChapter,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.send_mpv_command(json!(["add", "chapter", -1]));
+        self.show_osd("Previous chapter".to_string(), window, cx);
+        self.reveal_controls(window, cx);
+    }
+
+    fn jump_to_percent(&mut self, percent: f64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(duration_seconds) = self.current_media_duration_seconds() else {
+            self.reveal_controls(window, cx);
+            return;
+        };
+
+        let position_seconds = duration_seconds * percent.clamp(0.0, 1.0);
+        self.set_playback_position_seconds(position_seconds);
+        self.send_mpv_command(json!(["seek", position_seconds, "absolute+exact"]));
+        self.show_osd(
+            format!("Seek {}", format_timestamp(position_seconds)),
+            window,
+            cx,
+        );
+        self.reveal_controls(window, cx);
+    }
+
+    fn jump_to_percent_0(
+        &mut self,
+        _: &JumpToPercent0,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.jump_to_percent(0.0, window, cx);
+    }
+    fn jump_to_percent_1(
+        &mut self,
+        _: &JumpToPercent1,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.jump_to_percent(0.1, window, cx);
+    }
+    fn jump_to_percent_2(
+        &mut self,
+        _: &JumpToPercent2,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.jump_to_percent(0.2, window, cx);
+    }
+    fn jump_to_percent_3(
+        &mut self,
+        _: &JumpToPercent3,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.jump_to_percent(0.3, window, cx);
+    }
+    fn jump_to_percent_4(
+        &mut self,
+        _: &JumpToPercent4,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.jump_to_percent(0.4, window, cx);
+    }
+    fn jump_to_percent_5(
+        &mut self,
+        _: &JumpToPercent5,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.jump_to_percent(0.5, window, cx);
+    }
+    fn jump_to_percent_6(
+        &mut self,
+        _: &JumpToPercent6,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.jump_to_percent(0.6, window, cx);
+    }
+    fn jump_to_percent_7(
+        &mut self,
+        _: &JumpToPercent7,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.jump_to_percent(0.7, window, cx);
+    }
+    fn jump_to_percent_8(
+        &mut self,
+        _: &JumpToPercent8,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.jump_to_percent(0.8, window, cx);
+    }
+    fn jump_to_percent_9(
+        &mut self,
+        _: &JumpToPercent9,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.jump_to_percent(0.9, window, cx);
     }
 
     fn change_playback_speed(
@@ -1776,6 +2175,7 @@ impl OledVlcPlayer {
 
     fn toggle_shuffle(&mut self, _: &ToggleShuffle, window: &mut Window, cx: &mut Context<Self>) {
         self.is_shuffle_enabled = !self.is_shuffle_enabled;
+        self.rebuild_shuffle_bag();
         self.show_osd(
             if self.is_shuffle_enabled {
                 "Shuffle on"
@@ -1924,6 +2324,7 @@ impl OledVlcPlayer {
     fn reveal_library_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.playback_progress_generation += 1;
         self.record_current_media_progress();
+        self.flush_player_library_if_due(true);
         self.save_current_watch_session();
         self.stop_playback_process();
         self.is_playing = false;
@@ -1967,13 +2368,8 @@ impl OledVlcPlayer {
         }
 
         cx.spawn_in(window, async move |this, cx| {
-            for media_path in media_paths {
-                let _ = generate_timeline_thumbnail(
-                    &ffmpeg_path,
-                    &media_path,
-                    LIBRARY_THUMBNAIL_POSITION_SECONDS,
-                );
-            }
+            generate_library_thumbnails_bounded(ffmpeg_path, media_paths);
+            prune_thumbnail_cache();
 
             let _ = this.update_in(cx, |_player, _window, cx| {
                 cx.notify();
@@ -1992,8 +2388,8 @@ impl OledVlcPlayer {
             return;
         };
 
-        if is_video_path(&media_path) {
-            self.load_media_paths(vec![media_path], window, cx);
+        if is_video_path(&media_path) || is_playlist_path(&media_path) {
+            self.load_media_paths(media_paths_from_path(media_path), window, cx);
         }
         self.reveal_controls(window, cx);
     }
@@ -2137,6 +2533,7 @@ impl OledVlcPlayer {
         self.pending_watch_session = None;
         clear_saved_watch_session();
         self.record_current_media_progress();
+        self.flush_player_library_if_due(true);
         self.stop_playback_process();
         self.playback_queue = vec![build_live_capture_media(device)];
         self.current_queue_index = Some(0);
@@ -2200,6 +2597,36 @@ impl OledVlcPlayer {
         )
     }
 
+    fn refresh_audio_output_devices(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_audio_output_scan_pending {
+            return;
+        }
+
+        let Some(mpv_path) = self.dependency_status.mpv_path.clone() else {
+            return;
+        };
+
+        self.is_audio_output_scan_pending = true;
+        cx.spawn_in(window, async move |this, cx| {
+            let audio_output_devices = list_audio_output_devices(&mpv_path);
+
+            let _ = this.update_in(cx, |player, _window, cx| {
+                player.audio_output_devices = audio_output_devices;
+                player.is_audio_output_scan_pending = false;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn audio_output_device_label(&self, audio_output_device: &str) -> String {
+        self.audio_output_devices
+            .iter()
+            .find(|device_option| device_option.device_id == audio_output_device)
+            .map(|device_option| device_option.label.clone())
+            .unwrap_or_else(|| "Custom output".to_string())
+    }
+
     fn restart_current_live_capture_with_current_settings(
         &mut self,
         window: &mut Window,
@@ -2252,12 +2679,14 @@ impl OledVlcPlayer {
         }
 
         self.record_current_media_progress();
+        self.flush_player_library_if_due(true);
         self.playback_queue = media_paths
             .into_iter()
-            .map(|path| build_loaded_media(&path))
+            .map(|path| build_loaded_media(&path, &self.dependency_status))
             .collect();
         self.current_queue_index = Some(0);
         self.select_initial_tracks_for_queue_index(0);
+        self.restore_track_preferences_for_current_media();
         self.is_library_open = false;
         self.is_live_capture_menu_open = false;
         self.remember_current_queue_in_library();
@@ -2300,9 +2729,10 @@ impl OledVlcPlayer {
         }
 
         self.record_current_media_progress();
+        self.flush_player_library_if_due(true);
         self.playback_queue = media_paths
             .into_iter()
-            .map(|path| build_loaded_media(&path))
+            .map(|path| build_loaded_media(&path, &self.dependency_status))
             .collect();
 
         let fallback_queue_index = watch_session
@@ -2322,6 +2752,7 @@ impl OledVlcPlayer {
         self.volume_percent = watch_session.volume_percent.min(100);
         self.is_muted = watch_session.is_muted;
         self.select_initial_tracks_for_queue_index(resume_queue_index);
+        self.restore_track_preferences_for_current_media();
         self.is_library_open = false;
         self.is_live_capture_menu_open = false;
         self.remember_current_queue_in_library();
@@ -2362,6 +2793,27 @@ impl OledVlcPlayer {
         )
         .or_else(|| media.subtitle_paths.first().cloned());
         self.selected_embedded_subtitle_track_id = None;
+    }
+
+    fn restore_track_preferences_for_current_media(&mut self) {
+        let Some(current_media_path) = self.current_media_path() else {
+            return;
+        };
+        let current_media_path_key = library_media_path_key(&current_media_path);
+        let Some(history_entry) = self
+            .library
+            .media_history
+            .iter()
+            .find(|entry| library_media_path_key(&entry.path) == current_media_path_key)
+            .cloned()
+        else {
+            return;
+        };
+
+        self.selected_audio_track_id = history_entry.selected_audio_track_id;
+        self.selected_embedded_subtitle_track_id =
+            history_entry.selected_embedded_subtitle_track_id;
+        self.selected_subtitle_path = history_entry.selected_subtitle_path;
     }
 
     fn select_embedded_subtitle_track(
@@ -2414,6 +2866,20 @@ impl OledVlcPlayer {
         self.send_mpv_command(json!(["set_property", "volume", self.volume_percent]));
         self.show_osd(format!("Volume {}%", self.volume_percent), window, cx);
         self.reveal_controls(window, cx);
+    }
+
+    fn set_volume_percent_if_changed(
+        &mut self,
+        volume_percent: u8,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let volume_percent = volume_percent.min(100);
+        if self.volume_percent == volume_percent {
+            return;
+        }
+
+        self.set_volume_percent(volume_percent, window, cx);
     }
 
     fn move_queue_item_up(
@@ -2485,7 +2951,21 @@ impl OledVlcPlayer {
         self.reveal_controls(window, cx);
     }
 
-    fn next_queue_index_for_playback(&self, is_from_eof: bool) -> Option<usize> {
+    fn rebuild_shuffle_bag(&mut self) {
+        use rand::seq::SliceRandom;
+
+        let Some(current_index) = self.current_queue_index else {
+            self.shuffle_bag.clear();
+            return;
+        };
+
+        self.shuffle_bag = (0..self.playback_queue.len())
+            .filter(|index| *index != current_index)
+            .collect();
+        self.shuffle_bag.shuffle(&mut rand::thread_rng());
+    }
+
+    fn next_queue_index_for_playback(&mut self, is_from_eof: bool) -> Option<usize> {
         let current_queue_index = self.current_queue_index?;
         let queue_len = self.playback_queue.len();
 
@@ -2497,7 +2977,10 @@ impl OledVlcPlayer {
                 .then_some(current_queue_index);
         }
         if self.is_shuffle_enabled {
-            return Some(shuffled_queue_index(current_queue_index, queue_len));
+            if self.shuffle_bag.is_empty() {
+                self.rebuild_shuffle_bag();
+            }
+            return self.shuffle_bag.pop();
         }
 
         let next_queue_index = current_queue_index + 1;
@@ -2547,8 +3030,10 @@ impl OledVlcPlayer {
     fn play_queue_item(&mut self, queue_index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if queue_index < self.playback_queue.len() {
             self.record_current_media_progress();
+            self.flush_player_library_if_due(true);
             self.current_queue_index = Some(queue_index);
             self.select_initial_tracks_for_queue_index(queue_index);
+            self.restore_track_preferences_for_current_media();
             self.is_library_open = false;
             self.start_current_media_playback(window, cx);
         }
@@ -2875,8 +3360,44 @@ impl OledVlcPlayer {
         cx.notify();
     }
 
+    fn open_subtitle_file_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(subtitle_path) = rfd::FileDialog::new()
+            .set_title("Load subtitle")
+            .add_filter("Subtitle files", &SUBTITLE_EXTENSIONS)
+            .pick_file()
+        else {
+            return;
+        };
+
+        if !is_subtitle_path(&subtitle_path) {
+            self.status_message = Some("Unsupported subtitle file.".into());
+            cx.notify();
+            return;
+        }
+
+        self.selected_subtitle_path = Some(subtitle_path.clone());
+        self.selected_embedded_subtitle_track_id = None;
+
+        if let Some(current_queue_index) = self.current_queue_index {
+            if let Some(current_media) = self.playback_queue.get_mut(current_queue_index) {
+                if !current_media.subtitle_paths.contains(&subtitle_path) {
+                    current_media.subtitle_paths.push(subtitle_path);
+                }
+            }
+        }
+
+        self.load_selected_subtitle_in_backend();
+        self.show_osd("Subtitle loaded".to_string(), window, cx);
+        self.reveal_controls(window, cx);
+    }
+
     fn load_library_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        self.load_media_paths(media_paths_from_path(path), window, cx);
+        let media_paths = if path.is_dir() {
+            media_paths_in_folder_cached(&path, &mut self.folder_listing_cache)
+        } else {
+            media_paths_from_path(path)
+        };
+        self.load_media_paths(media_paths, window, cx);
         self.reveal_controls(window, cx);
     }
 
@@ -2889,7 +3410,9 @@ impl OledVlcPlayer {
         let media_paths = history_entry
             .path
             .parent()
-            .map(media_paths_in_folder)
+            .map(|folder_path| {
+                media_paths_in_folder_cached(folder_path, &mut self.folder_listing_cache)
+            })
             .filter(|paths| !paths.is_empty())
             .unwrap_or_else(|| vec![history_entry.path.clone()]);
         self.load_watch_session(
@@ -2916,6 +3439,31 @@ impl OledVlcPlayer {
         save_player_settings(&self.settings);
         self.show_osd(message, window, cx);
         self.reveal_controls(window, cx);
+    }
+
+    fn save_current_window_bounds(&mut self, window: &Window) {
+        let viewport_size = window.viewport_size();
+        self.settings.window_bounds = Some(SavedWindowBounds {
+            width: viewport_size.width.as_f32(),
+            height: viewport_size.height.as_f32(),
+            x: None,
+            y: None,
+        });
+        save_player_settings(&self.settings);
+    }
+
+    fn save_current_window_bounds_if_due(&mut self, window: &Window) {
+        if window.is_fullscreen() {
+            return;
+        }
+
+        let now = current_time_millis();
+        if now.saturating_sub(self.last_window_bounds_flush_millis) < LIBRARY_FLUSH_INTERVAL_MS {
+            return;
+        }
+
+        self.last_window_bounds_flush_millis = now;
+        self.save_current_window_bounds(window);
     }
 
     fn set_default_volume_percent(&mut self, default_volume_percent: u8, cx: &mut Context<Self>) {
@@ -2954,6 +3502,22 @@ impl OledVlcPlayer {
             }
             SettingsSelectorChoice::ResumeBehavior(resume_behavior) => {
                 self.set_resume_behavior_setting(resume_behavior, window, cx);
+            }
+            SettingsSelectorChoice::SeekStepSeconds(seek_step_seconds) => {
+                self.settings.seek_step_seconds = seek_step_seconds;
+                self.save_settings_and_show(
+                    format!("Seek step {} seconds", seek_step_seconds),
+                    window,
+                    cx,
+                );
+            }
+            SettingsSelectorChoice::VolumeStepPercent(volume_step_percent) => {
+                self.settings.volume_step_percent = volume_step_percent;
+                self.save_settings_and_show(
+                    format!("Volume step {}%", volume_step_percent),
+                    window,
+                    cx,
+                );
             }
             SettingsSelectorChoice::PreferredAudioLanguage(preferred_audio_language) => {
                 self.set_preferred_audio_language_setting(preferred_audio_language, window, cx);
@@ -2996,7 +3560,7 @@ impl OledVlcPlayer {
         self.save_settings_and_show(
             format!(
                 "Audio output {}",
-                audio_output_device_label(&self.settings.audio_output_device)
+                self.audio_output_device_label(&self.settings.audio_output_device)
             ),
             window,
             cx,
@@ -3140,7 +3704,7 @@ impl OledVlcPlayer {
     }
 
     fn render_video_surface(
-        &self,
+        &mut self,
         is_window_fullscreen: bool,
         viewport_width: f32,
         viewport_height: f32,
@@ -3333,7 +3897,7 @@ impl OledVlcPlayer {
     }
 
     fn render_empty_video_plane(
-        &self,
+        &mut self,
         is_window_fullscreen: bool,
         viewport_width: f32,
         viewport_height: f32,
@@ -3380,7 +3944,7 @@ impl OledVlcPlayer {
     }
 
     fn render_library_mode(
-        &self,
+        &mut self,
         is_window_fullscreen: bool,
         viewport_width: f32,
         viewport_height: f32,
@@ -3388,7 +3952,7 @@ impl OledVlcPlayer {
     ) -> impl IntoElement {
         let library_scale = library_ui_scale(viewport_width, viewport_height);
         let content_width = library_content_width(viewport_width, library_scale);
-        let shelves = self.library_shelves();
+        let shelves = self.library_shelves_cached();
         let has_library_shelves = !shelves.is_empty();
 
         div()
@@ -3445,9 +4009,24 @@ impl OledVlcPlayer {
                                 div()
                                     .flex()
                                     .gap(px(8.0 * library_scale))
-                                    .child(
-                                        self.render_live_capture_device_dropdown(library_scale, cx),
-                                    )
+                                    .child(self.render_live_capture_device_dropdown_button(
+                                        library_scale,
+                                        cx,
+                                    ))
+                                    .child(prompt_action_button(
+                                        "library-unwatched-only",
+                                        if self.show_unwatched_only {
+                                            "All Episodes"
+                                        } else {
+                                            "Unwatched"
+                                        },
+                                        false,
+                                        library_scale,
+                                        cx,
+                                        |player, _window, cx| {
+                                            player.toggle_unwatched_only(cx);
+                                        },
+                                    ))
                                     .child(prompt_action_button(
                                         "library-open-file",
                                         "Open File",
@@ -3483,19 +4062,24 @@ impl OledVlcPlayer {
             .when(self.library_context_menu_media_path.is_some(), |plane| {
                 plane.child(self.render_library_context_menu(viewport_width, viewport_height, cx))
             })
+            .when(self.is_live_capture_menu_open, |plane| {
+                plane.child(self.render_live_capture_device_overlay(
+                    viewport_width,
+                    viewport_height,
+                    content_width,
+                    library_scale,
+                    cx,
+                ))
+            })
             .child(self.render_library_fullscreen_button(is_window_fullscreen, library_scale, cx))
             .child(self.render_library_settings_button(library_scale, cx))
     }
 
-    fn render_live_capture_device_dropdown(
+    fn render_live_capture_device_dropdown_button(
         &self,
         library_scale: f32,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let is_menu_open = self.is_live_capture_menu_open;
-        let is_scan_pending = self.is_live_capture_scan_pending;
-        let dropdown_width = 360.0 * library_scale;
-
         div()
             .id("library-live-capture")
             .relative()
@@ -3509,50 +4093,110 @@ impl OledVlcPlayer {
                     player.toggle_live_capture_device_menu(window, cx);
                 },
             ))
-            .when(is_menu_open, |container| {
-                container.child(
-                    div()
-                        .id("library-live-capture-menu")
-                        .absolute()
-                        .top(px(42.0 * library_scale))
-                        .left_0()
-                        .w(px(dropdown_width))
-                        .max_h(px(320.0 * library_scale))
-                        .overflow_y_scroll()
-                        .scrollbar_width(px((4.0 * library_scale).clamp(4.0, 10.0)))
-                        .p(px(8.0 * library_scale))
-                        .bg(self.settings.surface_background_color(
-                            MENU_BLACK,
-                            BACKDROP_BLUR_MENU_BACKGROUND_ALPHA,
+    }
+
+    fn render_live_capture_device_overlay(
+        &self,
+        viewport_width: f32,
+        viewport_height: f32,
+        content_width: f32,
+        library_scale: f32,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let is_scan_pending = self.is_live_capture_scan_pending;
+        let dropdown_width = LIVE_CAPTURE_DROPDOWN_WIDTH * library_scale;
+        let content_left = ((viewport_width - content_width) / 2.0).max(0.0);
+        let action_group_width = LIBRARY_ACTION_GROUP_ESTIMATED_WIDTH * library_scale;
+        let menu_left = (content_left + (content_width - action_group_width).max(0.0))
+            .clamp(8.0, (viewport_width - dropdown_width - 8.0).max(8.0));
+
+        div()
+            .id("library-live-capture-overlay")
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .child(
+                div()
+                    .id("library-live-capture-clickoff")
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .bg(gpui::transparent_black())
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|player, _event, _window, cx| {
+                            player.is_live_capture_menu_open = false;
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|player, _event, _window, cx| {
+                            player.is_live_capture_menu_open = false;
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
+                    ),
+            )
+            .child(
+                div()
+                    .id("library-live-capture-menu")
+                    .absolute()
+                    .top(px(LIBRARY_LIVE_CAPTURE_OVERLAY_TOP * library_scale))
+                    .left(px(menu_left))
+                    .w(px(dropdown_width))
+                    .max_h(px((viewport_height - (92.0 * library_scale)).max(220.0)))
+                    .overflow_y_scroll()
+                    .scrollbar_width(px((4.0 * library_scale).clamp(4.0, 10.0)))
+                    .p(px(8.0 * library_scale))
+                    .bg(self
+                        .settings
+                        .surface_background_color(MENU_BLACK, BACKDROP_BLUR_MENU_BACKGROUND_ALPHA))
+                    .border_1()
+                    .border_color(rgb(BRIGHT_BORDER))
+                    .rounded_sm()
+                    .shadow_lg()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0 * library_scale))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|_player, _event, _window, cx| {
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|_player, _event, _window, cx| {
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .child(self.render_live_capture_refresh_row(library_scale, cx))
+                    .child(self.render_live_capture_audio_source_section(library_scale, cx))
+                    .when(is_scan_pending, |menu| {
+                        menu.child(scaled_menu_message(
+                            "Scanning capture devices...",
+                            library_scale,
                         ))
-                        .border_1()
-                        .border_color(rgb(BRIGHT_BORDER))
-                        .shadow_lg()
-                        .flex()
-                        .flex_col()
-                        .gap(px(4.0 * library_scale))
-                        .child(self.render_live_capture_refresh_row(library_scale, cx))
-                        .child(self.render_live_capture_audio_source_section(library_scale, cx))
-                        .when(is_scan_pending, |menu| {
+                    })
+                    .when(
+                        !is_scan_pending && self.live_capture_devices.is_empty(),
+                        |menu| {
                             menu.child(scaled_menu_message(
-                                "Scanning capture devices...",
+                                "No capture devices found.",
                                 library_scale,
                             ))
-                        })
-                        .when(
-                            !is_scan_pending && self.live_capture_devices.is_empty(),
-                            |menu| {
-                                menu.child(scaled_menu_message(
-                                    "No capture devices found.",
-                                    library_scale,
-                                ))
-                            },
-                        )
-                        .children(self.live_capture_devices.iter().cloned().map(|device| {
-                            self.render_live_capture_device_row(device, library_scale, cx)
-                        })),
-                )
-            })
+                        },
+                    )
+                    .children(self.live_capture_devices.iter().cloned().map(|device| {
+                        self.render_live_capture_device_row(device, library_scale, cx)
+                    })),
+            )
     }
 
     fn render_live_capture_refresh_row(
@@ -3569,6 +4213,7 @@ impl OledVlcPlayer {
             .text_size(px(12.0 * library_scale))
             .line_height(px(16.0 * library_scale))
             .text_color(rgb(MUTED_TEXT))
+            .rounded_sm()
             .cursor_pointer()
             .hover(|row| row.bg(rgb(0x121212)))
             .on_click(cx.listener(|player, _, window, cx| {
@@ -3672,6 +4317,7 @@ impl OledVlcPlayer {
             } else {
                 rgb_alpha(OLED_BLACK, 0.0)
             })
+            .rounded_sm()
             .cursor_pointer()
             .hover(|row| row.bg(rgb(0x121212)))
             .on_click(cx.listener(move |player, _, window, cx| {
@@ -3718,6 +4364,7 @@ impl OledVlcPlayer {
             .gap(px(2.0 * library_scale))
             .px(px(8.0 * library_scale))
             .py(px(7.0 * library_scale))
+            .rounded_sm()
             .cursor_pointer()
             .hover(|row| row.bg(rgb(0x121212)))
             .on_click(cx.listener(move |player, _, window, cx| {
@@ -3850,85 +4497,14 @@ impl OledVlcPlayer {
             })
     }
 
-    fn library_shelves(&self) -> Vec<LibraryShelf> {
-        let watched_media_path_keys = self.watched_media_path_keys();
-        let series_shelves = series_library_shelves(&self.library, &watched_media_path_keys);
-        let grouped_media_paths = series_shelves
-            .iter()
-            .flat_map(|shelf| shelf.items.iter().map(|item| item.path.clone()))
-            .collect::<HashSet<_>>();
+    fn library_shelves_cached(&mut self) -> Vec<LibraryShelf> {
+        if self.library_view_model.generation != self.library_generation {
+            self.library_view_model.shelves =
+                build_library_shelves(&self.library, self.show_unwatched_only);
+            self.library_view_model.generation = self.library_generation;
+        }
 
-        let mut shelves = Vec::new();
-        shelves.push(LibraryShelf {
-            key: "continue-watching".to_string(),
-            title: "Continue Watching".to_string(),
-            subtitle: None,
-            empty_message: "No in-progress media yet.",
-            items: self.continue_watching_library_items(),
-        });
-        shelves.push(LibraryShelf {
-            key: "recent-media".to_string(),
-            title: "Recent Media".to_string(),
-            subtitle: None,
-            empty_message: "No recent media yet.",
-            items: self.recent_media_library_items(&grouped_media_paths, &watched_media_path_keys),
-        });
-        shelves.extend(series_shelves);
-        shelves
-            .into_iter()
-            .filter(|shelf| !shelf.items.is_empty())
-            .collect()
-    }
-
-    fn watched_media_path_keys(&self) -> HashSet<String> {
-        self.library
-            .media_history
-            .iter()
-            .filter(|entry| entry.is_completed)
-            .map(|entry| library_media_path_key(&entry.path))
-            .collect()
-    }
-
-    fn continue_watching_library_items(&self) -> Vec<LibraryGridItem> {
-        self.library
-            .media_history
-            .iter()
-            .filter(|entry| {
-                !entry.is_completed
-                    && entry.playback_position_seconds >= MINIMUM_RESUME_POSITION_SECONDS
-                    && entry.path.is_file()
-            })
-            .take(MAX_LIBRARY_ITEMS_PER_SHELF)
-            .map(|history_entry| {
-                let mut item = library_item_for_media_path(&history_entry.path, false);
-                item.subtitle = Some(format!(
-                    "{} watched",
-                    format_timestamp(history_entry.playback_position_seconds)
-                ));
-                item.resume_history_entry = Some(history_entry.clone());
-                item.can_remove_from_continue_watching = true;
-                item
-            })
-            .collect()
-    }
-
-    fn recent_media_library_items(
-        &self,
-        grouped_media_paths: &HashSet<PathBuf>,
-        watched_media_path_keys: &HashSet<String>,
-    ) -> Vec<LibraryGridItem> {
-        self.library
-            .recent_media_paths
-            .iter()
-            .filter(|path| path.is_file() && is_video_path(path))
-            .filter(|path| !grouped_media_paths.contains(*path))
-            .take(MAX_LIBRARY_ITEMS_PER_SHELF)
-            .map(|path| {
-                let mut item = library_item_for_media_path(path, false);
-                item.is_watched = watched_media_path_keys.contains(&library_media_path_key(path));
-                item
-            })
-            .collect()
+        self.library_view_model.shelves.clone()
     }
 
     fn render_library_shelf_section(
@@ -4173,6 +4749,12 @@ impl OledVlcPlayer {
         cx.notify();
     }
 
+    fn toggle_unwatched_only(&mut self, cx: &mut Context<Self>) {
+        self.show_unwatched_only = !self.show_unwatched_only;
+        self.mark_library_dirty();
+        cx.notify();
+    }
+
     fn update_continue_remove_hover(
         &mut self,
         media_path: PathBuf,
@@ -4234,7 +4816,8 @@ impl OledVlcPlayer {
         if self.exiting_continue_remove_media_path.as_ref() == Some(&media_path) {
             self.exiting_continue_remove_media_path = None;
         }
-        save_player_library(&self.library);
+        self.mark_library_dirty();
+        save_player_library_atomic(&self.library);
         self.status_message = Some("Removed from Continue Watching.".into());
         cx.notify();
     }
@@ -4269,6 +4852,9 @@ impl OledVlcPlayer {
                 duration_seconds,
                 is_completed: true,
                 updated_at_millis: current_time_millis(),
+                selected_audio_track_id: None,
+                selected_embedded_subtitle_track_id: None,
+                selected_subtitle_path: None,
             },
         );
         self.library.media_history.truncate(MAX_RECENT_MEDIA * 2);
@@ -4280,7 +4866,65 @@ impl OledVlcPlayer {
         self.library_context_menu_anchor = None;
         self.library_context_menu_media_path = None;
         self.status_message = Some("Marked watched.".into());
-        save_player_library(&self.library);
+        self.mark_library_dirty();
+        save_player_library_atomic(&self.library);
+        cx.notify();
+    }
+
+    fn mark_library_media_unwatched(&mut self, media_path: PathBuf, cx: &mut Context<Self>) {
+        let media_path_key = library_media_path_key(&media_path);
+
+        if let Some(entry) = self
+            .library
+            .media_history
+            .iter_mut()
+            .find(|entry| library_media_path_key(&entry.path) == media_path_key)
+        {
+            entry.is_completed = false;
+            entry.playback_position_seconds = 0.0;
+            entry.updated_at_millis = current_time_millis();
+        } else {
+            self.library.media_history.insert(
+                0,
+                MediaHistoryEntry {
+                    path: media_path.clone(),
+                    playback_position_seconds: 0.0,
+                    duration_seconds: None,
+                    is_completed: false,
+                    updated_at_millis: current_time_millis(),
+                    selected_audio_track_id: None,
+                    selected_embedded_subtitle_track_id: None,
+                    selected_subtitle_path: None,
+                },
+            );
+        }
+
+        promote_recent_path(
+            &mut self.library.recent_media_paths,
+            media_path,
+            MAX_RECENT_MEDIA,
+        );
+        self.library_context_menu_anchor = None;
+        self.library_context_menu_media_path = None;
+        self.status_message = Some("Marked unwatched.".into());
+        self.mark_library_dirty();
+        save_player_library_atomic(&self.library);
+        cx.notify();
+    }
+
+    fn pin_library_folder(&mut self, folder_path: PathBuf, cx: &mut Context<Self>) {
+        if !folder_path.is_dir() {
+            return;
+        }
+
+        promote_recent_path(
+            &mut self.library.pinned_folder_paths,
+            folder_path,
+            MAX_RECENT_FOLDERS,
+        );
+        self.status_message = Some("Folder pinned.".into());
+        self.mark_library_dirty();
+        save_player_library_atomic(&self.library);
         cx.notify();
     }
 
@@ -4335,18 +4979,38 @@ impl OledVlcPlayer {
             .rounded_sm()
             .border_1()
             .border_color(rgb(BRIGHT_BORDER))
+            .rounded_sm()
             .shadow_lg()
             .flex()
             .flex_col()
             .gap_1()
             .text_color(rgb(SOFT_WHITE))
-            .child(simple_menu_action(
-                "Mark Watched",
-                cx,
+            .child(simple_menu_action("Mark Watched", cx, {
+                let media_path = media_path.clone();
                 move |player, _window, cx| {
                     player.mark_library_media_watched(media_path.clone(), cx);
-                },
-            ))
+                }
+            }))
+            .child(simple_menu_action("Mark Unwatched", cx, {
+                let media_path = media_path.clone();
+                move |player, _window, cx| {
+                    player.mark_library_media_unwatched(media_path.clone(), cx);
+                }
+            }))
+            .child(simple_menu_action("Pin Folder", cx, {
+                let media_path = media_path.clone();
+                move |player, _window, cx| {
+                    let folder_path = if media_path.is_dir() {
+                        media_path.clone()
+                    } else {
+                        media_path
+                            .parent()
+                            .map(Path::to_path_buf)
+                            .unwrap_or_default()
+                    };
+                    player.pin_library_folder(folder_path, cx);
+                }
+            }))
     }
 
     fn library_context_menu_origin(&self, viewport_width: f32, viewport_height: f32) -> (f32, f32) {
@@ -4416,11 +5080,13 @@ impl OledVlcPlayer {
             .map(|character| character.to_ascii_uppercase().to_string())
             .unwrap_or_else(|| "W".to_string());
 
+        let card_id = stable_path_ui_id(
+            &format!("library-card-{}", library_safe_element_key(&section_title)),
+            &item_path,
+        );
+
         div()
-            .id(format!(
-                "library-card-{section_title}-{}",
-                item_path.display()
-            ))
+            .id(card_id)
             .flex()
             .flex_col()
             .gap(px(8.0 * library_scale))
@@ -4441,6 +5107,7 @@ impl OledVlcPlayer {
                     .w_full()
                     .aspect_ratio(16.0 / 9.0)
                     .overflow_hidden()
+                    .rounded_sm()
                     .bg(rgb(0x101010))
                     .border_1()
                     .border_color(rgb(FINE_BORDER))
@@ -4877,6 +5544,7 @@ impl OledVlcPlayer {
                     .h(px(THUMBNAIL_PREVIEW_HEIGHT))
                     .bg(rgb(0x111111))
                     .overflow_hidden()
+                    .rounded_sm()
                     .when_some(thumbnail_path, |frame, thumbnail_path| {
                         frame.child(
                             img(thumbnail_path)
@@ -5046,10 +5714,47 @@ impl OledVlcPlayer {
                 div()
                     .flex()
                     .items_center()
-                    .justify_end()
+                    .justify_between()
                     .gap_2()
                     .px_2()
                     .pb_1()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(context_icon_button(
+                                "main-menu-previous",
+                                ICON_PREVIOUS,
+                                "Previous queue item",
+                                cx,
+                                |player, window, cx| {
+                                    player.play_previous_queue_item(window, cx);
+                                },
+                            ))
+                            .child(context_icon_button(
+                                "main-menu-play",
+                                if self.is_playing {
+                                    ICON_PAUSE
+                                } else {
+                                    ICON_PLAY
+                                },
+                                "Play or pause",
+                                cx,
+                                |player, window, cx| {
+                                    player.toggle_playback(&TogglePlayback, window, cx);
+                                },
+                            ))
+                            .child(context_icon_button(
+                                "main-menu-next",
+                                ICON_NEXT,
+                                "Next queue item",
+                                cx,
+                                |player, window, cx| {
+                                    player.play_next_queue_item(window, cx);
+                                },
+                            )),
+                    )
                     .child(self.render_playback_mode_toggles("main-menu", cx)),
             )
             .child(simple_menu_action("Open File", cx, |player, window, cx| {
@@ -5392,43 +6097,6 @@ impl OledVlcPlayer {
                                 },
                             )),
                     )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(context_icon_button(
-                                "settings-previous",
-                                ICON_PREVIOUS,
-                                "Previous queue item",
-                                cx,
-                                |player, window, cx| {
-                                    player.play_previous_queue_item(window, cx);
-                                },
-                            ))
-                            .child(context_icon_button(
-                                "settings-play",
-                                if self.is_playing {
-                                    ICON_PAUSE
-                                } else {
-                                    ICON_PLAY
-                                },
-                                "Play or pause",
-                                cx,
-                                |player, window, cx| {
-                                    player.toggle_playback(&TogglePlayback, window, cx);
-                                },
-                            ))
-                            .child(context_icon_button(
-                                "settings-next",
-                                ICON_NEXT,
-                                "Next queue item",
-                                cx,
-                                |player, window, cx| {
-                                    player.play_next_queue_item(window, cx);
-                                },
-                            )),
-                    )
                     .child(self.render_settings_menu_section(cx)),
             )
             .when_some(self.open_settings_selector, |backdrop, selector_kind| {
@@ -5537,6 +6205,13 @@ impl OledVlcPlayer {
                 },
             ))
             .child(simple_menu_action(
+                "Load Subtitle File",
+                cx,
+                |player, window, cx| {
+                    player.open_subtitle_file_picker(window, cx);
+                },
+            ))
+            .child(simple_menu_action(
                 "Search Subtitles",
                 cx,
                 |player, _window, cx| {
@@ -5578,7 +6253,7 @@ impl OledVlcPlayer {
             .child(self.render_default_volume_setting_row(cx))
             .child(self.render_settings_action_row(
                 "Audio Output",
-                audio_output_device_label(&self.settings.audio_output_device),
+                self.audio_output_device_label(&self.settings.audio_output_device),
                 cx,
                 |player, _window, cx| {
                     player.open_settings_selector(SettingsSelectorKind::AudioOutput, cx);
@@ -5590,6 +6265,22 @@ impl OledVlcPlayer {
                 cx,
                 |player, _window, cx| {
                     player.open_settings_selector(SettingsSelectorKind::ResumeBehavior, cx);
+                },
+            ))
+            .child(self.render_settings_action_row(
+                "Seek Step",
+                format!("{}s", self.settings.seek_step_seconds),
+                cx,
+                |player, _window, cx| {
+                    player.open_settings_selector(SettingsSelectorKind::SeekStep, cx);
+                },
+            ))
+            .child(self.render_settings_action_row(
+                "Volume Step",
+                format!("{}%", self.settings.volume_step_percent),
+                cx,
+                |player, _window, cx| {
+                    player.open_settings_selector(SettingsSelectorKind::VolumeStep, cx);
                 },
             ))
             .child(self.render_settings_action_row(
@@ -5770,14 +6461,15 @@ impl OledVlcPlayer {
         selector_kind: SettingsSelectorKind,
     ) -> Vec<SettingsSelectorOption> {
         match selector_kind {
-            SettingsSelectorKind::AudioOutput => AUDIO_OUTPUT_DEVICE_OPTIONS
+            SettingsSelectorKind::AudioOutput => self
+                .audio_output_devices
                 .iter()
                 .map(|audio_output_device| SettingsSelectorOption {
-                    label: audio_output_device.label.to_string(),
-                    detail: None,
+                    label: audio_output_device.label.clone(),
+                    detail: Some(audio_output_device.device_id.clone()),
                     is_selected: self.settings.audio_output_device == audio_output_device.device_id,
                     choice: SettingsSelectorChoice::AudioOutputDevice(
-                        audio_output_device.device_id.to_string(),
+                        audio_output_device.device_id.clone(),
                     ),
                 })
                 .collect(),
@@ -5794,6 +6486,25 @@ impl OledVlcPlayer {
                 choice: SettingsSelectorChoice::ResumeBehavior(resume_behavior),
             })
             .collect(),
+            SettingsSelectorKind::SeekStep => [3.0, 5.0, 10.0, 30.0]
+                .into_iter()
+                .map(|seek_step_seconds| SettingsSelectorOption {
+                    label: format!("{seek_step_seconds} seconds"),
+                    detail: None,
+                    is_selected: (self.settings.seek_step_seconds - seek_step_seconds).abs()
+                        < f64::EPSILON,
+                    choice: SettingsSelectorChoice::SeekStepSeconds(seek_step_seconds),
+                })
+                .collect(),
+            SettingsSelectorKind::VolumeStep => [1, 2, 5, 10]
+                .into_iter()
+                .map(|volume_step_percent| SettingsSelectorOption {
+                    label: format!("{volume_step_percent}%"),
+                    detail: None,
+                    is_selected: self.settings.volume_step_percent == volume_step_percent,
+                    choice: SettingsSelectorChoice::VolumeStepPercent(volume_step_percent),
+                })
+                .collect(),
             SettingsSelectorKind::PreferredAudioLanguage => self
                 .language_settings_selector_options(
                     &self.settings.preferred_audio_language,
@@ -5905,10 +6616,10 @@ impl OledVlcPlayer {
         label: &'static str,
         detail: String,
         cx: &mut Context<Self>,
-        on_click: impl Fn(&mut OledVlcPlayer, &mut Window, &mut Context<OledVlcPlayer>) + 'static,
+        on_click: impl Fn(&mut WatchPlayer, &mut Window, &mut Context<WatchPlayer>) + 'static,
     ) -> impl IntoElement {
         div()
-            .id(format!("settings-row-{label}"))
+            .id(stable_ui_id("settings-row", label))
             .flex()
             .items_center()
             .gap_2()
@@ -6126,7 +6837,7 @@ impl OledVlcPlayer {
         let subtitle_path_for_click = subtitle_path.clone();
 
         div()
-            .id(format!("subtitle-{}", subtitle_path.display()))
+            .id(stable_path_ui_id("subtitle", &subtitle_path))
             .flex()
             .items_center()
             .gap_2()
@@ -6168,7 +6879,7 @@ impl OledVlcPlayer {
     }
 }
 
-impl Focusable for OledVlcPlayer {
+impl Focusable for WatchPlayer {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
     }
@@ -6186,8 +6897,9 @@ impl Render for TooltipText {
     }
 }
 
-impl Render for OledVlcPlayer {
+impl Render for WatchPlayer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.save_current_window_bounds_if_due(window);
         let is_window_fullscreen = window.is_fullscreen();
         let viewport_size = window.viewport_size();
         let viewport_width = viewport_size.width.as_f32();
@@ -6197,9 +6909,30 @@ impl Render for OledVlcPlayer {
             self.settings.is_backdrop_blur_enabled && self.is_library_surface_visible();
 
         div()
-            .id("oled-vlc-player")
-            .key_context("OledVlcPlayer")
+            .id("watch-player")
+            .key_context(WATCH_PLAYER_KEY_CONTEXT)
             .on_action(cx.listener(Self::toggle_playback))
+            .on_action(cx.listener(Self::toggle_mute_action))
+            .on_action(cx.listener(Self::toggle_fullscreen))
+            .on_action(cx.listener(Self::previous_queue_item))
+            .on_action(cx.listener(Self::next_queue_item))
+            .on_action(cx.listener(Self::frame_step_backward))
+            .on_action(cx.listener(Self::frame_step_forward))
+            .on_action(cx.listener(Self::set_ab_loop_a))
+            .on_action(cx.listener(Self::set_ab_loop_b))
+            .on_action(cx.listener(Self::clear_ab_loop))
+            .on_action(cx.listener(Self::seek_to_previous_chapter))
+            .on_action(cx.listener(Self::seek_to_next_chapter))
+            .on_action(cx.listener(Self::jump_to_percent_0))
+            .on_action(cx.listener(Self::jump_to_percent_1))
+            .on_action(cx.listener(Self::jump_to_percent_2))
+            .on_action(cx.listener(Self::jump_to_percent_3))
+            .on_action(cx.listener(Self::jump_to_percent_4))
+            .on_action(cx.listener(Self::jump_to_percent_5))
+            .on_action(cx.listener(Self::jump_to_percent_6))
+            .on_action(cx.listener(Self::jump_to_percent_7))
+            .on_action(cx.listener(Self::jump_to_percent_8))
+            .on_action(cx.listener(Self::jump_to_percent_9))
             .on_action(cx.listener(Self::increase_subtitle_delay))
             .on_action(cx.listener(Self::decrease_subtitle_delay))
             .on_action(cx.listener(Self::reset_subtitle_delay))
@@ -6267,13 +7000,36 @@ impl Render for OledVlcPlayer {
                     ScrollDelta::Lines(delta) => delta.y,
                 };
                 if scroll_delta < 0.0 {
-                    player.change_volume_by(VOLUME_STEP_PERCENT, window, cx);
+                    player.change_volume_by(player.settings.volume_step_percent, window, cx);
                 } else if scroll_delta > 0.0 {
-                    player.change_volume_by(-VOLUME_STEP_PERCENT, window, cx);
+                    player.change_volume_by(-player.settings.volume_step_percent, window, cx);
                 }
             }))
             .on_drop(
                 cx.listener(|player, external_paths: &ExternalPaths, window, cx| {
+                    let subtitle_paths = external_paths
+                        .paths()
+                        .iter()
+                        .filter(|path| path.is_file() && is_subtitle_path(path))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if let Some(subtitle_path) = subtitle_paths.first().cloned() {
+                        player.selected_subtitle_path = Some(subtitle_path.clone());
+                        player.selected_embedded_subtitle_track_id = None;
+                        if let Some(current_queue_index) = player.current_queue_index {
+                            if let Some(current_media) =
+                                player.playback_queue.get_mut(current_queue_index)
+                            {
+                                if !current_media.subtitle_paths.contains(&subtitle_path) {
+                                    current_media.subtitle_paths.push(subtitle_path);
+                                }
+                            }
+                        }
+                        player.load_selected_subtitle_in_backend();
+                        player.show_osd("Subtitle loaded".to_string(), window, cx);
+                        return;
+                    }
+
                     let media_paths = external_paths
                         .paths()
                         .iter()
@@ -6293,9 +7049,10 @@ impl Render for OledVlcPlayer {
     }
 }
 
-impl Drop for OledVlcPlayer {
+impl Drop for WatchPlayer {
     fn drop(&mut self) {
         self.record_current_media_progress();
+        self.flush_player_library_if_due(true);
         self.save_current_watch_session();
         self.stop_playback_process();
     }
@@ -6321,7 +7078,7 @@ fn render_continue_remove_icon(
     let animation_direction = if is_hovered { "grow" } else { "shrink" };
     let animation_id = format!(
         "continue-remove-scale-{:016x}-{animation_direction}-{animation_generation}",
-        media_path_hash(media_path)
+        stable_hash_bytes(library_media_path_key(media_path).as_bytes())
     );
 
     icon.with_animation(
@@ -6402,7 +7159,7 @@ fn render_autoscrolling_library_title(
     let animation_id = format!(
         "library-title-scroll-{}-{:016x}",
         library_safe_element_key(section_title),
-        media_path_hash(media_path)
+        stable_hash_bytes(library_media_path_key(media_path).as_bytes())
     );
     let animation_duration = library_title_scroll_duration(scroll_distance);
 
@@ -6499,14 +7256,15 @@ fn scaled_menu_message(message: &'static str, menu_scale: f32) -> Div {
 
 fn simple_menu_action(
     label: &'static str,
-    cx: &mut Context<OledVlcPlayer>,
-    on_click: impl Fn(&mut OledVlcPlayer, &mut Window, &mut Context<OledVlcPlayer>) + 'static,
+    cx: &mut Context<WatchPlayer>,
+    on_click: impl Fn(&mut WatchPlayer, &mut Window, &mut Context<WatchPlayer>) + 'static,
 ) -> impl IntoElement {
     div()
         .id(format!("simple-menu-action-{label}"))
         .px_2()
         .py_1()
         .text_sm()
+        .rounded_sm()
         .cursor_pointer()
         .hover(|menu_item| menu_item.bg(rgb(0x121212)))
         .on_click(cx.listener(move |player, _, window, cx| {
@@ -6520,8 +7278,8 @@ fn context_section_button(
     label: &'static str,
     detail: String,
     is_open: bool,
-    cx: &mut Context<OledVlcPlayer>,
-    on_click: impl Fn(&mut OledVlcPlayer, &mut Window, &mut Context<OledVlcPlayer>) + 'static,
+    cx: &mut Context<WatchPlayer>,
+    on_click: impl Fn(&mut WatchPlayer, &mut Window, &mut Context<WatchPlayer>) + 'static,
 ) -> impl IntoElement {
     div()
         .id(format!("context-section-{label}"))
@@ -6535,6 +7293,7 @@ fn context_section_button(
         } else {
             rgb_alpha(OLED_BLACK, 0.0)
         })
+        .rounded_sm()
         .cursor_pointer()
         .hover(|row| row.bg(rgb(0x121212)))
         .on_click(cx.listener(move |player, _, window, cx| {
@@ -6569,8 +7328,8 @@ fn playback_mode_icon_button(
     icon_path: &'static str,
     tooltip: String,
     is_active: bool,
-    cx: &mut Context<OledVlcPlayer>,
-    on_click: impl Fn(&mut OledVlcPlayer, &mut Window, &mut Context<OledVlcPlayer>) + 'static,
+    cx: &mut Context<WatchPlayer>,
+    on_click: impl Fn(&mut WatchPlayer, &mut Window, &mut Context<WatchPlayer>) + 'static,
 ) -> impl IntoElement {
     div()
         .id(id)
@@ -6590,6 +7349,7 @@ fn playback_mode_icon_button(
         } else {
             rgb_alpha(OLED_BLACK, 0.0)
         })
+        .rounded_sm()
         .text_color(if is_active {
             rgb(VLC_ORANGE)
         } else {
@@ -6625,8 +7385,8 @@ fn context_icon_button(
     id: &'static str,
     icon_path: &'static str,
     tooltip: &'static str,
-    cx: &mut Context<OledVlcPlayer>,
-    on_click: impl Fn(&mut OledVlcPlayer, &mut Window, &mut Context<OledVlcPlayer>) + 'static,
+    cx: &mut Context<WatchPlayer>,
+    on_click: impl Fn(&mut WatchPlayer, &mut Window, &mut Context<WatchPlayer>) + 'static,
 ) -> impl IntoElement {
     div()
         .id(id)
@@ -6636,6 +7396,7 @@ fn context_icon_button(
         .w(px(34.0))
         .h(px(30.0))
         .text_color(rgb(SOFT_WHITE))
+        .rounded_sm()
         .cursor_pointer()
         .hover(|button| button.bg(rgb(0x151515)))
         .active(|button| button.opacity(0.76))
@@ -6662,8 +7423,8 @@ fn queue_row_icon_button(
     icon_path: &'static str,
     tooltip: &'static str,
     is_enabled: bool,
-    cx: &mut Context<OledVlcPlayer>,
-    on_click: impl Fn(&mut OledVlcPlayer, &mut Window, &mut Context<OledVlcPlayer>) + 'static,
+    cx: &mut Context<WatchPlayer>,
+    on_click: impl Fn(&mut WatchPlayer, &mut Window, &mut Context<WatchPlayer>) + 'static,
 ) -> impl IntoElement {
     div()
         .id(id)
@@ -6673,6 +7434,7 @@ fn queue_row_icon_button(
         .w(px(24.0))
         .h(px(24.0))
         .text_color(rgb(SOFT_WHITE))
+        .rounded_sm()
         .opacity(if is_enabled { 1.0 } else { 0.32 })
         .cursor_pointer()
         .hover(|button| button.bg(rgb(0x151515)))
@@ -6704,8 +7466,8 @@ fn prompt_action_button(
     label: &'static str,
     is_primary: bool,
     button_scale: f32,
-    cx: &mut Context<OledVlcPlayer>,
-    on_click: impl Fn(&mut OledVlcPlayer, &mut Window, &mut Context<OledVlcPlayer>) + 'static,
+    cx: &mut Context<WatchPlayer>,
+    on_click: impl Fn(&mut WatchPlayer, &mut Window, &mut Context<WatchPlayer>) + 'static,
 ) -> impl IntoElement {
     div()
         .id(id)
@@ -6729,6 +7491,7 @@ fn prompt_action_button(
         } else {
             rgb(FINE_BORDER)
         })
+        .rounded_sm()
         .cursor_pointer()
         .hover(|button| button.opacity(0.82))
         .active(|button| button.opacity(0.72))
@@ -6742,8 +7505,8 @@ fn square_button(
     id: &'static str,
     label: &'static str,
     tooltip: &'static str,
-    cx: &mut Context<OledVlcPlayer>,
-    on_click: impl Fn(&mut OledVlcPlayer, &mut Window, &mut Context<OledVlcPlayer>) + 'static,
+    cx: &mut Context<WatchPlayer>,
+    on_click: impl Fn(&mut WatchPlayer, &mut Window, &mut Context<WatchPlayer>) + 'static,
 ) -> impl IntoElement {
     div()
         .id(id)
@@ -6754,6 +7517,7 @@ fn square_button(
         .h(px(42.0))
         .text_color(rgb(SOFT_WHITE))
         .text_sm()
+        .rounded_sm()
         .cursor_pointer()
         .hover(|button| button.opacity(0.72))
         .active(|button| button.opacity(0.76))
@@ -6773,8 +7537,8 @@ fn icon_button(
     id: &'static str,
     icon_path: &'static str,
     tooltip: &'static str,
-    cx: &mut Context<OledVlcPlayer>,
-    on_click: impl Fn(&mut OledVlcPlayer, &mut Window, &mut Context<OledVlcPlayer>) + 'static,
+    cx: &mut Context<WatchPlayer>,
+    on_click: impl Fn(&mut WatchPlayer, &mut Window, &mut Context<WatchPlayer>) + 'static,
 ) -> impl IntoElement {
     div()
         .id(id)
@@ -6980,23 +7744,33 @@ fn send_mpv_ipc_command(ipc_path: &str, command: Value) -> bool {
 }
 
 fn read_mpv_playback_snapshot(ipc_path: &str) -> Option<MpvPlaybackSnapshot> {
-    let time_pos_seconds = read_mpv_property(ipc_path, "time-pos").and_then(json_f64);
-    let duration_seconds = read_mpv_property(ipc_path, "duration").and_then(json_f64);
-    let is_paused = read_mpv_property(ipc_path, "pause").and_then(|value| value.as_bool());
-    let is_eof_reached =
-        read_mpv_property(ipc_path, "eof-reached").and_then(|value| value.as_bool());
-    let volume_percent = read_mpv_property(ipc_path, "volume")
+    let properties = read_mpv_properties(ipc_path, MPV_POLL_PROPERTIES)?;
+    let time_pos_seconds = properties.get("time-pos").cloned().and_then(json_f64);
+    let duration_seconds = properties.get("duration").cloned().and_then(json_f64);
+    let is_paused = properties.get("pause").and_then(Value::as_bool);
+    let is_eof_reached = properties.get("eof-reached").and_then(Value::as_bool);
+    let volume_percent = properties
+        .get("volume")
+        .cloned()
         .and_then(json_f64)
         .map(|volume| volume.round().clamp(0.0, 100.0) as u8);
-    let is_muted = read_mpv_property(ipc_path, "mute").and_then(|value| value.as_bool());
-    let playback_speed = read_mpv_property(ipc_path, "speed").and_then(json_f64);
-    let audio_track_id = read_mpv_property(ipc_path, "aid").and_then(json_i64);
-    let subtitle_track_id = read_mpv_property(ipc_path, "sid").and_then(json_i64);
-    let track_list = read_mpv_property(ipc_path, "track-list");
-    let (audio_tracks, embedded_subtitle_tracks) = track_list
-        .as_ref()
+    let is_muted = properties.get("mute").and_then(Value::as_bool);
+    let playback_speed = properties.get("speed").cloned().and_then(json_f64);
+    let audio_track_id = properties.get("aid").cloned().and_then(json_i64);
+    let subtitle_track_id = properties.get("sid").cloned().and_then(json_i64);
+    let (audio_tracks, embedded_subtitle_tracks) = properties
+        .get("track-list")
         .map(mpv_tracks_from_track_list)
         .unwrap_or_default();
+    let chapters = properties
+        .get("chapter-list")
+        .map(mpv_chapters_from_value)
+        .unwrap_or_default();
+    let current_chapter_index = properties
+        .get("chapter")
+        .and_then(Value::as_i64)
+        .filter(|chapter| *chapter >= 0)
+        .map(|chapter| chapter as usize);
 
     if time_pos_seconds.is_none()
         && duration_seconds.is_none()
@@ -7009,6 +7783,8 @@ fn read_mpv_playback_snapshot(ipc_path: &str) -> Option<MpvPlaybackSnapshot> {
         && subtitle_track_id.is_none()
         && audio_tracks.is_empty()
         && embedded_subtitle_tracks.is_empty()
+        && chapters.is_empty()
+        && current_chapter_index.is_none()
     {
         return None;
     }
@@ -7023,25 +7799,50 @@ fn read_mpv_playback_snapshot(ipc_path: &str) -> Option<MpvPlaybackSnapshot> {
         playback_speed,
         audio_track_id,
         subtitle_track_id,
+        chapters,
+        current_chapter_index,
         audio_tracks,
         embedded_subtitle_tracks,
     })
 }
 
-fn read_mpv_property(ipc_path: &str, property_name: &str) -> Option<Value> {
-    let response = request_mpv_ipc_response(
-        ipc_path,
-        json!({
+fn read_mpv_properties(ipc_path: &str, property_names: &[&str]) -> Option<HashMap<String, Value>> {
+    let mut ipc_stream = open_mpv_ipc_read_write(ipc_path)?;
+    let mut responses = HashMap::new();
+
+    for property_name in property_names {
+        let payload = json!({
             "command": ["get_property", property_name],
             "request_id": property_name,
-        }),
-    )?;
+        })
+        .to_string();
 
-    if response.get("error").and_then(Value::as_str) == Some("success") {
-        response.get("data").cloned()
-    } else {
-        None
+        ipc_stream.write_all(payload.as_bytes()).ok()?;
+        ipc_stream.write_all(b"\n").ok()?;
     }
+
+    ipc_stream.flush().ok()?;
+    let mut reader = BufReader::new(ipc_stream);
+
+    for _ in 0..property_names.len() {
+        let mut response_line = String::new();
+        if reader.read_line(&mut response_line).ok()? == 0 {
+            break;
+        }
+
+        let response = serde_json::from_str::<Value>(&response_line).ok()?;
+        if response.get("error").and_then(Value::as_str) != Some("success") {
+            continue;
+        }
+        let Some(request_id) = response.get("request_id").and_then(Value::as_str) else {
+            continue;
+        };
+        if let Some(data) = response.get("data") {
+            responses.insert(request_id.to_string(), data.clone());
+        }
+    }
+
+    Some(responses)
 }
 
 fn json_f64(value: Value) -> Option<f64> {
@@ -7106,6 +7907,28 @@ fn mpv_tracks_from_track_list(track_list: &Value) -> (Vec<AudioTrack>, Vec<Embed
     (audio_tracks, subtitle_tracks)
 }
 
+fn mpv_chapters_from_value(value: &Value) -> Vec<Chapter> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|chapter| {
+            let time_seconds = chapter.get("time").and_then(Value::as_f64)?;
+            let title = chapter
+                .get("title")
+                .and_then(Value::as_str)
+                .filter(|title| !title.is_empty())
+                .unwrap_or("Chapter")
+                .to_string();
+
+            Some(Chapter {
+                title,
+                time_seconds,
+            })
+        })
+        .collect()
+}
+
 fn track_title_from_mpv_track(track: &Value, track_id: i64, track_type: &str) -> String {
     track
         .get("title")
@@ -7145,47 +7968,17 @@ fn write_mpv_ipc_payload(ipc_path: &str, payload: &str) -> bool {
 }
 
 #[cfg(target_os = "windows")]
-fn request_mpv_ipc_response(ipc_path: &str, payload: Value) -> Option<Value> {
-    let mut ipc_stream = OpenOptions::new()
+fn open_mpv_ipc_read_write(ipc_path: &str) -> Option<std::fs::File> {
+    OpenOptions::new()
         .read(true)
         .write(true)
         .open(ipc_path)
-        .ok()?;
-    let payload = payload.to_string();
-    ipc_stream.write_all(payload.as_bytes()).ok()?;
-    ipc_stream.write_all(b"\n").ok()?;
-    ipc_stream.flush().ok()?;
-
-    read_mpv_response_line(BufReader::new(ipc_stream))
+        .ok()
 }
 
 #[cfg(not(target_os = "windows"))]
-fn request_mpv_ipc_response(ipc_path: &str, payload: Value) -> Option<Value> {
-    use std::os::unix::net::UnixStream;
-
-    let mut ipc_stream = UnixStream::connect(ipc_path).ok()?;
-    let payload = payload.to_string();
-    ipc_stream.write_all(payload.as_bytes()).ok()?;
-    ipc_stream.write_all(b"\n").ok()?;
-    ipc_stream.flush().ok()?;
-
-    read_mpv_response_line(BufReader::new(ipc_stream))
-}
-
-fn read_mpv_response_line<R: BufRead>(mut reader: R) -> Option<Value> {
-    for _ in 0..8 {
-        let mut response_line = String::new();
-        if reader.read_line(&mut response_line).ok()? == 0 {
-            return None;
-        }
-
-        let response = serde_json::from_str::<Value>(&response_line).ok()?;
-        if response.get("error").is_some() {
-            return Some(response);
-        }
-    }
-
-    None
+fn open_mpv_ipc_read_write(ipc_path: &str) -> Option<std::os::unix::net::UnixStream> {
+    std::os::unix::net::UnixStream::connect(ipc_path).ok()
 }
 
 #[cfg(target_os = "windows")]
@@ -7283,7 +8076,7 @@ fn wide_null(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-fn volume_slider(volume_percent: u8, cx: &mut Context<OledVlcPlayer>) -> impl IntoElement {
+fn volume_slider(volume_percent: u8, cx: &mut Context<WatchPlayer>) -> impl IntoElement {
     let filled_width = VOLUME_SLIDER_WIDTH * f32::from(volume_percent.min(100)) / 100.0;
 
     div()
@@ -7311,40 +8104,34 @@ fn volume_slider(volume_percent: u8, cx: &mut Context<OledVlcPlayer>) -> impl In
         )
         .child(
             div()
+                .id("volume-slider-hitbox")
                 .absolute()
                 .left_0()
                 .right_0()
                 .top_0()
                 .bottom_0()
-                .flex()
                 .cursor_pointer()
-                .children((0..VOLUME_SLIDER_SEGMENT_COUNT).map(|segment_index| {
-                    let volume_percent = segment_index as u8;
-
-                    div()
-                        .id(format!("volume-segment-{segment_index}"))
-                        .flex_1()
-                        .h(px(42.0))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |player, _event, window, cx| {
-                                player.set_volume_percent(volume_percent, window, cx);
-                            }),
-                        )
-                        .on_mouse_move(cx.listener(
-                            move |player, event: &gpui::MouseMoveEvent, window, cx| {
-                                if event.dragging() {
-                                    player.set_volume_percent(volume_percent, window, cx);
-                                }
-                            },
-                        ))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|player, event: &MouseDownEvent, window, cx| {
+                        let volume_percent =
+                            volume_percent_from_slider_event(window, event.position);
+                        player.set_volume_percent_if_changed(volume_percent, window, cx);
+                    }),
+                )
+                .on_mouse_move(cx.listener(|player, event: &MouseMoveEvent, window, cx| {
+                    if event.dragging() {
+                        let volume_percent =
+                            volume_percent_from_slider_event(window, event.position);
+                        player.set_volume_percent_if_changed(volume_percent, window, cx);
+                    }
                 })),
         )
 }
 
 fn default_volume_slider(
     default_volume_percent: u8,
-    cx: &mut Context<OledVlcPlayer>,
+    cx: &mut Context<WatchPlayer>,
 ) -> impl IntoElement {
     let filled_width = VOLUME_SLIDER_WIDTH * f32::from(default_volume_percent.min(100)) / 100.0;
 
@@ -7373,37 +8160,42 @@ fn default_volume_slider(
         )
         .child(
             div()
+                .id("default-volume-slider-hitbox")
                 .absolute()
                 .left_0()
                 .right_0()
                 .top_0()
                 .bottom_0()
-                .flex()
                 .cursor_pointer()
-                .children((0..VOLUME_SLIDER_SEGMENT_COUNT).map(|segment_index| {
-                    let default_volume_percent = segment_index as u8;
-
-                    div()
-                        .id(format!("default-volume-segment-{segment_index}"))
-                        .flex_1()
-                        .h(px(34.0))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |player, _event, _window, cx| {
-                                player.set_default_volume_percent(default_volume_percent, cx);
-                                cx.stop_propagation();
-                            }),
-                        )
-                        .on_mouse_move(cx.listener(
-                            move |player, event: &gpui::MouseMoveEvent, _window, cx| {
-                                if event.dragging() {
-                                    player.set_default_volume_percent(default_volume_percent, cx);
-                                    cx.stop_propagation();
-                                }
-                            },
-                        ))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|player, event: &MouseDownEvent, window, cx| {
+                        let default_volume_percent =
+                            volume_percent_from_slider_event(window, event.position);
+                        player.set_default_volume_percent(default_volume_percent, cx);
+                        cx.stop_propagation();
+                    }),
+                )
+                .on_mouse_move(cx.listener(|player, event: &MouseMoveEvent, window, cx| {
+                    if event.dragging() {
+                        let default_volume_percent =
+                            volume_percent_from_slider_event(window, event.position);
+                        player.set_default_volume_percent(default_volume_percent, cx);
+                        cx.stop_propagation();
+                    }
                 })),
         )
+}
+
+fn volume_percent_from_slider_event(window: &Window, position: Point<Pixels>) -> u8 {
+    let viewport_width = window.viewport_size().width.as_f32();
+    let slider_right_padding = 16.0;
+    let slider_left = viewport_width - slider_right_padding - VOLUME_SLIDER_WIDTH;
+    let local_x = position.x.as_f32() - slider_left;
+
+    ((local_x / VOLUME_SLIDER_WIDTH) * 100.0)
+        .round()
+        .clamp(0.0, 100.0) as u8
 }
 
 fn format_timestamp(seconds: f64) -> String {
@@ -7426,20 +8218,33 @@ fn display_name(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-fn initial_media_paths_from_args() -> Vec<PathBuf> {
-    std::env::args_os()
-        .skip(1)
-        .map(PathBuf::from)
-        .flat_map(|path| {
-            if path.is_dir() {
-                media_paths_in_folder(&path)
-            } else if path.is_file() && is_video_path(&path) {
-                vec![path]
-            } else {
-                Vec::new()
+fn startup_options_from_args() -> StartupOptions {
+    let mut options = StartupOptions::default();
+    let mut args = std::env::args_os().skip(1);
+
+    while let Some(arg) = args.next() {
+        match arg.to_string_lossy().as_ref() {
+            "--fullscreen" => options.start_fullscreen = Some(true),
+            "--windowed" => options.start_fullscreen = Some(false),
+            "--resume-never" => options.resume_behavior = Some(ResumeBehavior::Never),
+            "--resume-always" => options.resume_behavior = Some(ResumeBehavior::Always),
+            "--resume-ask" => options.resume_behavior = Some(ResumeBehavior::Ask),
+            "--folder" => {
+                if let Some(folder) = args.next() {
+                    options
+                        .media_paths
+                        .extend(media_paths_in_folder(&PathBuf::from(folder)));
+                }
             }
-        })
-        .collect()
+            _ => {
+                options
+                    .media_paths
+                    .extend(media_paths_from_path(PathBuf::from(arg)));
+            }
+        }
+    }
+
+    options
 }
 
 fn queue_display_name(path: &Path) -> String {
@@ -7512,11 +8317,19 @@ fn is_subtitle_path(path: &Path) -> bool {
         .is_some_and(|extension| SUBTITLE_EXTENSIONS.contains(&extension))
 }
 
+fn is_playlist_path(path: &Path) -> bool {
+    extension_lowercase(path)
+        .as_deref()
+        .is_some_and(|extension| PLAYLIST_EXTENSIONS.contains(&extension))
+}
+
 fn media_paths_from_path(path: PathBuf) -> Vec<PathBuf> {
     if path.is_dir() {
         media_paths_in_folder(&path)
     } else if path.is_file() && is_video_path(&path) {
         vec![path]
+    } else if path.is_file() && is_playlist_path(&path) {
+        media_paths_from_playlist(&path)
     } else {
         Vec::new()
     }
@@ -7526,29 +8339,98 @@ fn video_file_dialog(title: &str) -> rfd::FileDialog {
     rfd::FileDialog::new()
         .set_title(title)
         .add_filter("Video files", &VIDEO_EXTENSIONS)
+        .add_filter("Playlists", &PLAYLIST_EXTENSIONS)
 }
 
 fn media_paths_in_folder(folder_path: &Path) -> Vec<PathBuf> {
     let mut media_paths = Vec::new();
-    collect_media_paths_in_folder(folder_path, &mut media_paths);
+    let mut pending_dirs = vec![folder_path.to_path_buf()];
+
+    while let Some(directory) = pending_dirs.pop() {
+        let Ok(entries) = fs::read_dir(&directory) else {
+            continue;
+        };
+
+        for entry in entries.filter_map(Result::ok) {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                pending_dirs.push(path);
+                continue;
+            }
+            if file_type.is_file() && is_video_path(&path) {
+                media_paths.push(path);
+            }
+        }
+    }
+
     media_paths.sort_by(|left, right| compare_natural_paths(left, right));
     media_paths.dedup();
     media_paths
 }
 
-fn collect_media_paths_in_folder(folder_path: &Path, media_paths: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(folder_path) else {
-        return;
+fn media_paths_from_playlist(playlist_path: &Path) -> Vec<PathBuf> {
+    let Ok(contents) = fs::read_to_string(playlist_path) else {
+        return Vec::new();
     };
+    let base_dir = playlist_path.parent().unwrap_or_else(|| Path::new("."));
 
-    for entry in entries.filter_map(Result::ok) {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_media_paths_in_folder(&path, media_paths);
-        } else if path.is_file() && is_video_path(&path) {
-            media_paths.push(path);
+    contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| {
+            let path = PathBuf::from(line);
+            if path.is_absolute() {
+                path
+            } else {
+                base_dir.join(path)
+            }
+        })
+        .filter(|path| path.is_file() && is_video_path(path))
+        .collect()
+}
+
+fn media_paths_in_folder_cached(
+    folder_path: &Path,
+    cache: &mut HashMap<String, FolderListingCacheEntry>,
+) -> Vec<PathBuf> {
+    let folder_key = library_media_path_key(folder_path);
+    let modified_millis = folder_modified_millis(folder_path).unwrap_or_default();
+
+    if let Some(entry) = cache.get(&folder_key) {
+        if entry.modified_millis == modified_millis {
+            return entry.media_paths.clone();
         }
     }
+
+    let media_paths = media_paths_in_folder(folder_path);
+    cache.insert(
+        folder_key,
+        FolderListingCacheEntry {
+            folder_path: folder_path.to_path_buf(),
+            modified_millis,
+            media_paths: media_paths.clone(),
+        },
+    );
+
+    media_paths
+}
+
+fn folder_modified_millis(path: &Path) -> Option<u128> {
+    fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_millis())
 }
 
 fn normalize_media_paths(media_paths: Vec<PathBuf>) -> Vec<PathBuf> {
@@ -7633,14 +8515,44 @@ fn compare_number_text(left: &str, right: &str) -> std::cmp::Ordering {
         .then_with(|| left.len().cmp(&right.len()))
 }
 
-fn build_loaded_media(path: &Path) -> LoadedMedia {
+fn build_loaded_media(path: &Path, dependency_status: &DependencyStatus) -> LoadedMedia {
     LoadedMedia {
         source: LoadedMediaSource::File(path.to_path_buf()),
-        duration_seconds: None,
+        duration_seconds: dependency_status
+            .ffprobe_path
+            .as_deref()
+            .and_then(|ffprobe_path| probe_media_duration_seconds(ffprobe_path, path)),
         audio_tracks: Vec::new(),
         subtitle_paths: discover_sidecar_subtitles(path),
         embedded_subtitle_tracks: Vec::new(),
     }
+}
+
+fn probe_media_duration_seconds(ffprobe_path: &Path, media_path: &Path) -> Option<f64> {
+    let mut command = Command::new(ffprobe_path);
+    command
+        .arg("-v")
+        .arg("error")
+        .arg("-show_entries")
+        .arg("format=duration")
+        .arg("-of")
+        .arg("default=noprint_wrappers=1:nokey=1")
+        .arg(media_path.as_os_str())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    hide_child_process_window(&mut command);
+
+    let output = command.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|duration| duration.is_finite() && *duration > 0.0)
 }
 
 fn build_live_capture_media(device: LiveCaptureDevice) -> LoadedMedia {
@@ -7955,7 +8867,7 @@ fn save_watch_session(watch_session: &SavedWatchSession) {
         return;
     };
 
-    let _ = fs::write(session_file_path, serialized_session);
+    let _ = write_json_file_atomic(&session_file_path, &serialized_session);
 }
 
 fn clear_saved_watch_session() {
@@ -7979,85 +8891,7 @@ fn load_player_settings() -> PlayerSettings {
     let Ok(serialized_settings) = fs::read_to_string(settings_file_path) else {
         return PlayerSettings::default();
     };
-    let Ok(settings_value) = serde_json::from_str::<Value>(&serialized_settings) else {
-        return PlayerSettings::default();
-    };
-    let default_settings = PlayerSettings::default();
-
-    PlayerSettings {
-        default_volume_percent: settings_value
-            .get("default_volume_percent")
-            .and_then(Value::as_u64)
-            .map(|volume_percent| volume_percent.min(100) as u8)
-            .unwrap_or(default_settings.default_volume_percent),
-        resume_behavior: settings_value
-            .get("resume_behavior")
-            .and_then(Value::as_str)
-            .map(ResumeBehavior::from_str)
-            .unwrap_or(default_settings.resume_behavior),
-        preferred_audio_language: settings_value
-            .get("preferred_audio_language")
-            .and_then(Value::as_str)
-            .unwrap_or(&default_settings.preferred_audio_language)
-            .to_string(),
-        preferred_subtitle_language: settings_value
-            .get("preferred_subtitle_language")
-            .and_then(Value::as_str)
-            .unwrap_or(&default_settings.preferred_subtitle_language)
-            .to_string(),
-        prefer_embedded_subtitles: settings_value
-            .get("prefer_embedded_subtitles")
-            .and_then(Value::as_bool)
-            .unwrap_or(default_settings.prefer_embedded_subtitles),
-        audio_output_device: settings_value
-            .get("audio_output_device")
-            .and_then(Value::as_str)
-            .filter(|audio_output_device| !audio_output_device.is_empty())
-            .unwrap_or(&default_settings.audio_output_device)
-            .to_string(),
-        live_capture_audio_source: settings_value
-            .get("live_capture_audio_source")
-            .and_then(Value::as_str)
-            .filter(|live_capture_audio_source| !live_capture_audio_source.is_empty())
-            .unwrap_or(&default_settings.live_capture_audio_source)
-            .to_string(),
-        is_lowest_latency_live_capture_enabled: settings_value
-            .get("is_lowest_latency_live_capture_enabled")
-            .and_then(Value::as_bool)
-            .unwrap_or(default_settings.is_lowest_latency_live_capture_enabled),
-        is_live_capture_exclusive_audio_enabled: settings_value
-            .get("is_live_capture_exclusive_audio_enabled")
-            .and_then(Value::as_bool)
-            .unwrap_or(default_settings.is_live_capture_exclusive_audio_enabled),
-        hardware_decoding_mode: settings_value
-            .get("hardware_decoding_mode")
-            .and_then(Value::as_str)
-            .unwrap_or(&default_settings.hardware_decoding_mode)
-            .to_string(),
-        start_fullscreen: settings_value
-            .get("start_fullscreen")
-            .and_then(Value::as_bool)
-            .unwrap_or(default_settings.start_fullscreen),
-        is_backdrop_blur_enabled: settings_value
-            .get("is_backdrop_blur_enabled")
-            .and_then(Value::as_bool)
-            .unwrap_or(default_settings.is_backdrop_blur_enabled),
-        subtitle_font_size: settings_value
-            .get("subtitle_font_size")
-            .and_then(Value::as_u64)
-            .map(|font_size| font_size.clamp(24, 96) as u8)
-            .unwrap_or(default_settings.subtitle_font_size),
-        subtitle_color: settings_value
-            .get("subtitle_color")
-            .and_then(Value::as_str)
-            .unwrap_or(&default_settings.subtitle_color)
-            .to_string(),
-        subtitle_position_percent: settings_value
-            .get("subtitle_position_percent")
-            .and_then(Value::as_u64)
-            .map(|position_percent| position_percent.min(100) as u8)
-            .unwrap_or(default_settings.subtitle_position_percent),
-    }
+    serde_json::from_str::<PlayerSettings>(&serialized_settings).unwrap_or_default()
 }
 
 fn save_player_settings(settings: &PlayerSettings) {
@@ -8069,28 +8903,11 @@ fn save_player_settings(settings: &PlayerSettings) {
         return;
     }
 
-    let settings_value = json!({
-        "default_volume_percent": settings.default_volume_percent,
-        "resume_behavior": settings.resume_behavior.as_str(),
-        "preferred_audio_language": settings.preferred_audio_language,
-        "preferred_subtitle_language": settings.preferred_subtitle_language,
-        "prefer_embedded_subtitles": settings.prefer_embedded_subtitles,
-        "audio_output_device": settings.audio_output_device,
-        "live_capture_audio_source": settings.live_capture_audio_source,
-        "is_lowest_latency_live_capture_enabled": settings.is_lowest_latency_live_capture_enabled,
-        "is_live_capture_exclusive_audio_enabled": settings.is_live_capture_exclusive_audio_enabled,
-        "hardware_decoding_mode": settings.hardware_decoding_mode,
-        "start_fullscreen": settings.start_fullscreen,
-        "is_backdrop_blur_enabled": settings.is_backdrop_blur_enabled,
-        "subtitle_font_size": settings.subtitle_font_size,
-        "subtitle_color": settings.subtitle_color,
-        "subtitle_position_percent": settings.subtitle_position_percent,
-    });
-    let Ok(serialized_settings) = serde_json::to_vec_pretty(&settings_value) else {
+    let Ok(serialized_settings) = serde_json::to_vec_pretty(settings) else {
         return;
     };
 
-    let _ = fs::write(settings_file_path, serialized_settings);
+    let _ = write_json_file_atomic(&settings_file_path, &serialized_settings);
 }
 
 fn load_player_library() -> PlayerLibrary {
@@ -8113,6 +8930,11 @@ fn load_player_library() -> PlayerLibrary {
             .filter(|path| path.is_dir())
             .take(MAX_RECENT_FOLDERS)
             .collect(),
+        pinned_folder_paths: json_paths(&library_value, "pinned_folder_paths")
+            .into_iter()
+            .filter(|path| path.is_dir())
+            .take(MAX_RECENT_FOLDERS)
+            .collect(),
         media_history: library_value
             .get("media_history")
             .and_then(Value::as_array)
@@ -8123,7 +8945,7 @@ fn load_player_library() -> PlayerLibrary {
     }
 }
 
-fn save_player_library(library: &PlayerLibrary) {
+fn save_player_library_atomic(library: &PlayerLibrary) {
     let library_file_path = watch_library_file_path();
     let Some(library_directory) = library_file_path.parent() else {
         return;
@@ -8143,6 +8965,11 @@ fn save_player_library(library: &PlayerLibrary) {
             .iter()
             .map(|path| path.display().to_string())
             .collect::<Vec<_>>(),
+        "pinned_folder_paths": library
+            .pinned_folder_paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>(),
         "media_history": library
             .media_history
             .iter()
@@ -8153,6 +8980,11 @@ fn save_player_library(library: &PlayerLibrary) {
                     "duration_seconds": entry.duration_seconds,
                     "is_completed": entry.is_completed,
                     "updated_at_millis": entry.updated_at_millis,
+                    "selected_audio_track_id": entry.selected_audio_track_id,
+                    "selected_embedded_subtitle_track_id": entry.selected_embedded_subtitle_track_id,
+                    "selected_subtitle_path": entry.selected_subtitle_path
+                        .as_ref()
+                        .map(|path| path.display().to_string()),
                 })
             })
             .collect::<Vec<_>>(),
@@ -8161,7 +8993,14 @@ fn save_player_library(library: &PlayerLibrary) {
         return;
     };
 
-    let _ = fs::write(library_file_path, serialized_library);
+    let _ = write_json_file_atomic(&library_file_path, &serialized_library);
+}
+
+fn write_json_file_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let temp_path = path.with_extension("tmp");
+    fs::write(&temp_path, bytes)?;
+    fs::rename(temp_path, path)?;
+    Ok(())
 }
 
 fn json_paths(parent_value: &Value, key: &str) -> Vec<PathBuf> {
@@ -8206,6 +9045,17 @@ fn media_history_entry_from_json(history_value: &Value) -> Option<MediaHistoryEn
             .and_then(Value::as_u64)
             .map(u128::from)
             .unwrap_or_default(),
+        selected_audio_track_id: history_value
+            .get("selected_audio_track_id")
+            .and_then(Value::as_i64),
+        selected_embedded_subtitle_track_id: history_value
+            .get("selected_embedded_subtitle_track_id")
+            .and_then(Value::as_i64),
+        selected_subtitle_path: history_value
+            .get("selected_subtitle_path")
+            .and_then(Value::as_str)
+            .map(PathBuf::from)
+            .filter(|path| path.is_file() && is_subtitle_path(path)),
     })
 }
 
@@ -8234,12 +9084,56 @@ fn library_media_path_key(path: &Path) -> String {
     }
 }
 
-fn audio_output_device_label(audio_output_device: &str) -> String {
-    AUDIO_OUTPUT_DEVICE_OPTIONS
-        .iter()
-        .find(|device_option| device_option.device_id == audio_output_device)
-        .map(|device_option| device_option.label.to_string())
-        .unwrap_or_else(|| "Custom output".to_string())
+fn default_audio_output_options() -> Vec<AudioOutputDeviceOption> {
+    vec![AudioOutputDeviceOption {
+        label: "Auto".to_string(),
+        device_id: AUDIO_OUTPUT_AUTO_DEVICE_ID.to_string(),
+    }]
+}
+
+fn list_audio_output_devices(mpv_path: &Path) -> Vec<AudioOutputDeviceOption> {
+    let mut command = Command::new(mpv_path);
+    command
+        .arg("--no-config")
+        .arg("--audio-device=help")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    hide_child_process_window(&mut command);
+
+    let Ok(output) = command.output() else {
+        return default_audio_output_options();
+    };
+
+    let mut text = String::from_utf8_lossy(&output.stdout).to_string();
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+
+    parse_mpv_audio_device_help(&text)
+}
+
+fn parse_mpv_audio_device_help(output: &str) -> Vec<AudioOutputDeviceOption> {
+    let mut devices = default_audio_output_options();
+    let mut seen_device_ids = HashSet::from([AUDIO_OUTPUT_AUTO_DEVICE_ID.to_string()]);
+
+    for line in output.lines() {
+        let line = line.trim();
+        let Some((device_id, label)) = line.split_once(' ') else {
+            continue;
+        };
+        let device_id = device_id.trim();
+        if (!device_id.contains('/') && device_id != AUDIO_OUTPUT_AUTO_DEVICE_ID)
+            || !seen_device_ids.insert(device_id.to_string())
+        {
+            continue;
+        }
+
+        devices.push(AudioOutputDeviceOption {
+            label: label.trim().to_string(),
+            device_id: device_id.to_string(),
+        });
+    }
+
+    devices
 }
 
 fn on_off_label(is_enabled: bool) -> &'static str {
@@ -8341,19 +9235,6 @@ fn language_aliases(language: &str) -> Vec<&'static str> {
         "spa" => vec!["spa", "es", "spanish"],
         "fra" => vec!["fra", "fre", "fr", "french"],
         _ => vec![""],
-    }
-}
-
-fn shuffled_queue_index(current_queue_index: usize, queue_len: usize) -> usize {
-    if queue_len <= 1 {
-        return current_queue_index;
-    }
-
-    let random_slot = (current_time_millis() as usize) % (queue_len - 1);
-    if random_slot >= current_queue_index {
-        random_slot + 1
-    } else {
-        random_slot
     }
 }
 
@@ -8724,9 +9605,114 @@ fn library_item_for_media_path(path: &Path, prefer_episode_label: bool) -> Libra
     }
 }
 
+fn build_library_shelves(library: &PlayerLibrary, show_unwatched_only: bool) -> Vec<LibraryShelf> {
+    let watched_media_path_keys = library
+        .media_history
+        .iter()
+        .filter(|entry| entry.is_completed)
+        .map(|entry| library_media_path_key(&entry.path))
+        .collect::<HashSet<_>>();
+    let series_shelves =
+        series_library_shelves(library, &watched_media_path_keys, show_unwatched_only);
+    let grouped_media_paths = series_shelves
+        .iter()
+        .flat_map(|shelf| shelf.items.iter().map(|item| item.path.clone()))
+        .collect::<HashSet<_>>();
+
+    let mut shelves = Vec::new();
+    shelves.push(LibraryShelf {
+        key: "pinned-folders".to_string(),
+        title: "Pinned Folders".to_string(),
+        subtitle: None,
+        empty_message: "No pinned folders yet.",
+        items: pinned_folder_library_items(library),
+    });
+    shelves.push(LibraryShelf {
+        key: "continue-watching".to_string(),
+        title: "Continue Watching".to_string(),
+        subtitle: None,
+        empty_message: "No in-progress media yet.",
+        items: continue_watching_library_items(library),
+    });
+    shelves.push(LibraryShelf {
+        key: "recent-media".to_string(),
+        title: "Recent Media".to_string(),
+        subtitle: None,
+        empty_message: "No recent media yet.",
+        items: recent_media_library_items(library, &grouped_media_paths, &watched_media_path_keys),
+    });
+    shelves.extend(series_shelves);
+
+    shelves
+        .into_iter()
+        .filter(|shelf| !shelf.items.is_empty())
+        .collect()
+}
+
+fn continue_watching_library_items(library: &PlayerLibrary) -> Vec<LibraryGridItem> {
+    library
+        .media_history
+        .iter()
+        .filter(|entry| {
+            !entry.is_completed
+                && entry.playback_position_seconds >= MINIMUM_RESUME_POSITION_SECONDS
+                && entry.path.is_file()
+        })
+        .take(MAX_LIBRARY_ITEMS_PER_SHELF)
+        .map(|history_entry| {
+            let mut item = library_item_for_media_path(&history_entry.path, false);
+            item.subtitle = Some(format!(
+                "{} watched",
+                format_timestamp(history_entry.playback_position_seconds)
+            ));
+            item.resume_history_entry = Some(history_entry.clone());
+            item.can_remove_from_continue_watching = true;
+            item
+        })
+        .collect()
+}
+
+fn recent_media_library_items(
+    library: &PlayerLibrary,
+    grouped_media_paths: &HashSet<PathBuf>,
+    watched_media_path_keys: &HashSet<String>,
+) -> Vec<LibraryGridItem> {
+    library
+        .recent_media_paths
+        .iter()
+        .filter(|path| path.is_file() && is_video_path(path))
+        .filter(|path| !grouped_media_paths.contains(*path))
+        .take(MAX_LIBRARY_ITEMS_PER_SHELF)
+        .map(|path| {
+            let mut item = library_item_for_media_path(path, false);
+            item.is_watched = watched_media_path_keys.contains(&library_media_path_key(path));
+            item
+        })
+        .collect()
+}
+
+fn pinned_folder_library_items(library: &PlayerLibrary) -> Vec<LibraryGridItem> {
+    library
+        .pinned_folder_paths
+        .iter()
+        .filter(|path| path.is_dir())
+        .map(|path| LibraryGridItem {
+            path: path.clone(),
+            title: display_name(path),
+            subtitle: Some("Pinned folder".to_string()),
+            episode_badge: None,
+            thumbnail_media_path: None,
+            resume_history_entry: None,
+            is_watched: false,
+            can_remove_from_continue_watching: false,
+        })
+        .collect()
+}
+
 fn series_library_shelves(
     library: &PlayerLibrary,
     watched_media_path_keys: &HashSet<String>,
+    show_unwatched_only: bool,
 ) -> Vec<LibraryShelf> {
     let mut media_paths_by_series_key: HashMap<String, Vec<PathBuf>> = HashMap::new();
     let mut display_title_by_series_key: HashMap<String, String> = HashMap::new();
@@ -8763,6 +9749,10 @@ fn series_library_shelves(
             let subtitle = season_subtitle_for_media_paths(&media_paths);
             let items = media_paths
                 .into_iter()
+                .filter(|media_path| {
+                    !show_unwatched_only
+                        || !watched_media_path_keys.contains(&library_media_path_key(media_path))
+                })
                 .take(MAX_LIBRARY_ITEMS_PER_SHELF)
                 .map(|media_path| {
                     let mut item = library_item_for_media_path(&media_path, true);
@@ -8818,11 +9808,25 @@ fn library_series_media_paths(library: &PlayerLibrary) -> Vec<PathBuf> {
         .map(|entry| entry.path.clone())
         .chain(library.recent_media_paths.iter().cloned())
     {
+        let media_path_key = library_media_path_key(&media_path);
         if media_path.is_file()
             && is_video_path(&media_path)
-            && seen_media_paths.insert(media_path.clone())
+            && seen_media_paths.insert(media_path_key)
         {
             media_paths.push(media_path);
+        }
+    }
+
+    for folder_path in library
+        .recent_folder_paths
+        .iter()
+        .chain(library.pinned_folder_paths.iter())
+    {
+        for media_path in media_paths_in_folder(folder_path) {
+            let media_path_key = library_media_path_key(&media_path);
+            if seen_media_paths.insert(media_path_key) {
+                media_paths.push(media_path);
+            }
         }
     }
 
@@ -8949,7 +9953,7 @@ fn library_thumbnail_path(media_path: &Path) -> PathBuf {
 
 fn first_existing_timeline_thumbnail_path(media_path: &Path) -> Option<PathBuf> {
     let thumbnail_directory = watch_session_directory().join(THUMBNAIL_CACHE_DIRECTORY_NAME);
-    let media_hash_prefix = format!("{:016x}-", media_path_hash(media_path));
+    let media_hash_prefix = format!("{}-", media_cache_key(media_path));
     let Ok(entries) = fs::read_dir(thumbnail_directory) else {
         return None;
     };
@@ -8969,18 +9973,119 @@ fn first_existing_timeline_thumbnail_path(media_path: &Path) -> Option<PathBuf> 
 }
 
 fn timeline_thumbnail_path(media_path: &Path, position_seconds: f64) -> PathBuf {
-    let media_hash = media_path_hash(media_path);
+    let media_key = media_cache_key(media_path);
     let thumbnail_second = thumbnail_second_for_position(position_seconds);
 
     watch_session_directory()
         .join(THUMBNAIL_CACHE_DIRECTORY_NAME)
-        .join(format!("{media_hash:016x}-{thumbnail_second}.jpg"))
+        .join(format!("{media_key}-{thumbnail_second}.jpg"))
 }
 
-fn media_path_hash(media_path: &Path) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    media_path.hash(&mut hasher);
-    hasher.finish()
+fn stable_hash_bytes(bytes: &[u8]) -> u64 {
+    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+
+    let mut hash = FNV_OFFSET_BASIS;
+
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+
+    hash
+}
+
+fn media_cache_key(media_path: &Path) -> String {
+    let path_key = library_media_path_key(media_path);
+    let metadata = fs::metadata(media_path).ok();
+    let file_len = metadata
+        .as_ref()
+        .map(|metadata| metadata.len())
+        .unwrap_or_default();
+    let modified_millis = metadata
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    let full_key = format!("{path_key}|{file_len}|{modified_millis}");
+
+    format!("{:016x}", stable_hash_bytes(full_key.as_bytes()))
+}
+
+fn stable_ui_id(prefix: &str, value: &str) -> String {
+    format!("{prefix}-{:016x}", stable_hash_bytes(value.as_bytes()))
+}
+
+fn stable_path_ui_id(prefix: &str, path: &Path) -> String {
+    let key = library_media_path_key(path);
+    stable_ui_id(prefix, &key)
+}
+
+fn prune_thumbnail_cache() {
+    let cache_dir = watch_session_directory().join(THUMBNAIL_CACHE_DIRECTORY_NAME);
+    let Ok(entries) = fs::read_dir(&cache_dir) else {
+        return;
+    };
+
+    let mut files = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            let metadata = entry.metadata().ok()?;
+            if !metadata.is_file() {
+                return None;
+            }
+            let modified = metadata.modified().ok()?;
+            Some((path, metadata.len(), modified))
+        })
+        .collect::<Vec<_>>();
+    let mut total_size = files.iter().map(|(_, size, _)| *size).sum::<u64>();
+
+    if total_size <= THUMBNAIL_CACHE_MAX_BYTES {
+        return;
+    }
+
+    files.sort_by_key(|(_, _, modified)| *modified);
+    for (path, size, _) in files {
+        if total_size <= THUMBNAIL_CACHE_MAX_BYTES {
+            break;
+        }
+        if fs::remove_file(&path).is_ok() {
+            total_size = total_size.saturating_sub(size);
+        }
+    }
+}
+
+fn generate_library_thumbnails_bounded(ffmpeg_path: PathBuf, media_paths: Vec<PathBuf>) {
+    let queue = Arc::new(Mutex::new(VecDeque::from(media_paths)));
+    let workers = (0..THUMBNAIL_WORKER_COUNT)
+        .map(|_| {
+            let queue = Arc::clone(&queue);
+            let ffmpeg_path = ffmpeg_path.clone();
+
+            std::thread::spawn(move || loop {
+                let media_path = {
+                    let Ok(mut queue) = queue.lock() else {
+                        return;
+                    };
+                    queue.pop_front()
+                };
+
+                let Some(media_path) = media_path else {
+                    break;
+                };
+                let _ = generate_timeline_thumbnail(
+                    &ffmpeg_path,
+                    &media_path,
+                    LIBRARY_THUMBNAIL_POSITION_SECONDS,
+                );
+            })
+        })
+        .collect::<Vec<_>>();
+
+    for worker in workers {
+        let _ = worker.join();
+    }
 }
 
 fn thumbnail_second_for_position(position_seconds: f64) -> u64 {
@@ -9042,6 +10147,14 @@ fn detect_dependency_status() -> DependencyStatus {
         mpv_path: locate_dependency("mpv"),
         ffprobe_path: locate_dependency("ffprobe"),
         ffmpeg_path: locate_dependency("ffmpeg"),
+    }
+}
+
+fn platform_support_message() -> Option<&'static str> {
+    if cfg!(target_os = "windows") {
+        None
+    } else {
+        Some("Embedded playback is currently Windows-only.")
     }
 }
 
@@ -9237,30 +10350,88 @@ fn icon_path(icon_file_name: &str) -> SharedString {
         .into()
 }
 
+fn initial_window_bounds(settings: &PlayerSettings, cx: &mut App) -> Bounds<Pixels> {
+    if let Some(saved_bounds) = settings.window_bounds.as_ref() {
+        return Bounds {
+            origin: point(
+                px(saved_bounds.x.unwrap_or(80.0)),
+                px(saved_bounds.y.unwrap_or(80.0)),
+            ),
+            size: size(
+                px(saved_bounds.width.max(640.0)),
+                px(saved_bounds.height.max(360.0)),
+            ),
+        };
+    }
+
+    Bounds::centered(None, size(px(1500.0), px(920.0)), cx)
+}
+
 fn run_application() {
-    let initial_media_paths = initial_media_paths_from_args();
-    let initial_player_settings = load_player_settings();
+    let startup_options = startup_options_from_args();
+    let initial_media_paths = startup_options.media_paths;
+    let mut initial_player_settings = load_player_settings();
+
+    if let Some(start_fullscreen) = startup_options.start_fullscreen {
+        initial_player_settings.start_fullscreen = start_fullscreen;
+    }
+    if let Some(resume_behavior) = startup_options.resume_behavior {
+        initial_player_settings.resume_behavior = resume_behavior;
+    }
 
     application().run(move |cx: &mut App| {
         cx.bind_keys([
-            KeyBinding::new("space", TogglePlayback, Some("OledVlcPlayer")),
-            KeyBinding::new("k", TogglePlayback, Some("OledVlcPlayer")),
-            KeyBinding::new("left", SeekBackward, Some("OledVlcPlayer")),
-            KeyBinding::new("right", SeekForward, Some("OledVlcPlayer")),
-            KeyBinding::new("j", SeekBackward, Some("OledVlcPlayer")),
-            KeyBinding::new("l", SeekForward, Some("OledVlcPlayer")),
-            KeyBinding::new("up", VolumeUp, Some("OledVlcPlayer")),
-            KeyBinding::new("down", VolumeDown, Some("OledVlcPlayer")),
-            KeyBinding::new("h", IncreaseSubtitleDelay, Some("OledVlcPlayer")),
-            KeyBinding::new("g", DecreaseSubtitleDelay, Some("OledVlcPlayer")),
-            KeyBinding::new("shift-g", ResetSubtitleDelay, Some("OledVlcPlayer")),
-            KeyBinding::new("=", IncreasePlaybackSpeed, Some("OledVlcPlayer")),
-            KeyBinding::new("-", DecreasePlaybackSpeed, Some("OledVlcPlayer")),
-            KeyBinding::new("s", ToggleShuffle, Some("OledVlcPlayer")),
-            KeyBinding::new("r", CycleRepeatMode, Some("OledVlcPlayer")),
+            KeyBinding::new("space", TogglePlayback, Some(WATCH_PLAYER_KEY_CONTEXT)),
+            KeyBinding::new("k", TogglePlayback, Some(WATCH_PLAYER_KEY_CONTEXT)),
+            KeyBinding::new("m", ToggleMute, Some(WATCH_PLAYER_KEY_CONTEXT)),
+            KeyBinding::new("f", ToggleFullscreen, Some(WATCH_PLAYER_KEY_CONTEXT)),
+            KeyBinding::new("n", NextQueueItem, Some(WATCH_PLAYER_KEY_CONTEXT)),
+            KeyBinding::new("p", PreviousQueueItem, Some(WATCH_PLAYER_KEY_CONTEXT)),
+            KeyBinding::new(".", FrameStepForward, Some(WATCH_PLAYER_KEY_CONTEXT)),
+            KeyBinding::new(",", FrameStepBackward, Some(WATCH_PLAYER_KEY_CONTEXT)),
+            KeyBinding::new("shift-a", SetABLoopA, Some(WATCH_PLAYER_KEY_CONTEXT)),
+            KeyBinding::new("shift-b", SetABLoopB, Some(WATCH_PLAYER_KEY_CONTEXT)),
+            KeyBinding::new("shift-c", ClearABLoop, Some(WATCH_PLAYER_KEY_CONTEXT)),
+            KeyBinding::new(
+                "shift-right",
+                SeekNextChapter,
+                Some(WATCH_PLAYER_KEY_CONTEXT),
+            ),
+            KeyBinding::new(
+                "shift-left",
+                SeekPreviousChapter,
+                Some(WATCH_PLAYER_KEY_CONTEXT),
+            ),
+            KeyBinding::new("0", JumpToPercent0, Some(WATCH_PLAYER_KEY_CONTEXT)),
+            KeyBinding::new("1", JumpToPercent1, Some(WATCH_PLAYER_KEY_CONTEXT)),
+            KeyBinding::new("2", JumpToPercent2, Some(WATCH_PLAYER_KEY_CONTEXT)),
+            KeyBinding::new("3", JumpToPercent3, Some(WATCH_PLAYER_KEY_CONTEXT)),
+            KeyBinding::new("4", JumpToPercent4, Some(WATCH_PLAYER_KEY_CONTEXT)),
+            KeyBinding::new("5", JumpToPercent5, Some(WATCH_PLAYER_KEY_CONTEXT)),
+            KeyBinding::new("6", JumpToPercent6, Some(WATCH_PLAYER_KEY_CONTEXT)),
+            KeyBinding::new("7", JumpToPercent7, Some(WATCH_PLAYER_KEY_CONTEXT)),
+            KeyBinding::new("8", JumpToPercent8, Some(WATCH_PLAYER_KEY_CONTEXT)),
+            KeyBinding::new("9", JumpToPercent9, Some(WATCH_PLAYER_KEY_CONTEXT)),
+            KeyBinding::new("left", SeekBackward, Some(WATCH_PLAYER_KEY_CONTEXT)),
+            KeyBinding::new("right", SeekForward, Some(WATCH_PLAYER_KEY_CONTEXT)),
+            KeyBinding::new("j", SeekBackward, Some(WATCH_PLAYER_KEY_CONTEXT)),
+            KeyBinding::new("l", SeekForward, Some(WATCH_PLAYER_KEY_CONTEXT)),
+            KeyBinding::new("up", VolumeUp, Some(WATCH_PLAYER_KEY_CONTEXT)),
+            KeyBinding::new("down", VolumeDown, Some(WATCH_PLAYER_KEY_CONTEXT)),
+            KeyBinding::new("h", IncreaseSubtitleDelay, Some(WATCH_PLAYER_KEY_CONTEXT)),
+            KeyBinding::new("g", DecreaseSubtitleDelay, Some(WATCH_PLAYER_KEY_CONTEXT)),
+            KeyBinding::new(
+                "shift-g",
+                ResetSubtitleDelay,
+                Some(WATCH_PLAYER_KEY_CONTEXT),
+            ),
+            KeyBinding::new("=", IncreasePlaybackSpeed, Some(WATCH_PLAYER_KEY_CONTEXT)),
+            KeyBinding::new("-", DecreasePlaybackSpeed, Some(WATCH_PLAYER_KEY_CONTEXT)),
+            KeyBinding::new("s", ToggleShuffle, Some(WATCH_PLAYER_KEY_CONTEXT)),
+            KeyBinding::new("r", CycleRepeatMode, Some(WATCH_PLAYER_KEY_CONTEXT)),
         ]);
 
-        let bounds = Bounds::centered(None, size(px(1500.0), px(920.0)), cx);
+        let bounds = initial_window_bounds(&initial_player_settings, cx);
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -9276,7 +10447,7 @@ fn run_application() {
             |window, cx| {
                 window.set_window_title(APP_NAME);
                 window.set_app_id(APP_ID);
-                let player = cx.new(|cx| OledVlcPlayer::new(initial_media_paths, window, cx));
+                let player = cx.new(|cx| WatchPlayer::new(initial_media_paths, window, cx));
                 player.focus_handle(cx).focus(window, cx);
                 player
             },

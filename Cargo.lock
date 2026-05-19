@@ -9,9 +9,11 @@ dependencies = [
  "embed-resource",
  "gpui",
  "gpui_platform",
+ "rand 0.8.6",
  "raw-window-handle",
  "resvg",
  "rfd",
+ "serde",
  "serde_json",
  "windows-sys 0.59.0",
 ]

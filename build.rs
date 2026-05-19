@@ -1,18 +1,10 @@
 use std::{
-    env,
-    fs::{self, OpenOptions},
-    io,
+    env, fs, io,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
 };
 
 const APP_NAME: &str = "Watch";
 const APP_EXE_NAME: &str = "Watch.exe";
-const AUTO_DISTRIBUTION_DISABLE_ENV_VAR: &str = "WATCH_DISABLE_AUTO_DISTRIBUTION";
-const CARGO_RELEASE_PROFILE: &str = "release";
-const WINDOWS_TARGET_OS: &str = "windows";
-const POWERSHELL_EXE_NAME: &str = "powershell.exe";
-const CREATE_NO_WINDOW_FLAG: u32 = 0x08000000;
 const ICON_RESOURCE_ID: u16 = 1;
 const ICON_IMAGE_SIZE: u32 = 256;
 const COLOR_CHANNEL_COUNT: usize = 4;
@@ -24,95 +16,13 @@ const ICO_COLOR_DEPTH: u16 = 32;
 const PLAY_MARK_RED: u8 = 255;
 const PLAY_MARK_GREEN: u8 = 138;
 const PLAY_MARK_BLUE: u8 = 42;
-const RELEASE_PACKAGING_WAIT_TIMEOUT_IN_SECONDS: u32 = 900;
-
 fn main() -> io::Result<()> {
     println!("cargo:rerun-if-changed=src/icons/play.svg");
     println!("cargo:rerun-if-changed=src");
-    println!("cargo:rerun-if-changed=installer");
     println!("cargo:rerun-if-changed=build.rs");
 
     #[cfg(target_os = "windows")]
     embed_windows_resources()?;
-
-    #[cfg(target_os = "windows")]
-    schedule_release_distribution_build()?;
-
-    Ok(())
-}
-
-#[cfg(target_os = "windows")]
-fn schedule_release_distribution_build() -> io::Result<()> {
-    let cargo_profile = env::var("PROFILE").unwrap_or_default();
-    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-
-    if cargo_profile != CARGO_RELEASE_PROFILE || target_os != WINDOWS_TARGET_OS {
-        return Ok(());
-    }
-
-    if env::var_os(AUTO_DISTRIBUTION_DISABLE_ENV_VAR).is_some() {
-        return Ok(());
-    }
-
-    let project_root = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            "CARGO_MANIFEST_DIR is not available",
-        )
-    })?);
-    let installer_script_path = project_root.join("installer").join("build-installer.ps1");
-
-    if !installer_script_path.exists() {
-        println!(
-            "cargo:warning=Skipped automatic distribution build because {} was not found.",
-            installer_script_path.display()
-        );
-        return Ok(());
-    }
-
-    let dist_directory = project_root.join("dist");
-    fs::create_dir_all(&dist_directory)?;
-
-    let release_build_stamp_path = dist_directory.join("cargo-release-build.stamp");
-    let packaging_log_path = dist_directory.join("cargo-release-distribution.log");
-    fs::write(
-        &release_build_stamp_path,
-        "Watch release build started. The installer packager waits for a newer executable.\n",
-    )?;
-
-    let packaging_log_file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&packaging_log_path)?;
-
-    let mut packaging_command = Command::new(POWERSHELL_EXE_NAME);
-    packaging_command
-        .current_dir(&project_root)
-        .arg("-NoProfile")
-        .arg("-ExecutionPolicy")
-        .arg("Bypass")
-        .arg("-File")
-        .arg(&installer_script_path)
-        .arg("-Configuration")
-        .arg(CARGO_RELEASE_PROFILE)
-        .arg("-SkipCargoBuild")
-        .arg("-WaitForExecutableNewerThan")
-        .arg(&release_build_stamp_path)
-        .arg("-WaitTimeoutInSeconds")
-        .arg(RELEASE_PACKAGING_WAIT_TIMEOUT_IN_SECONDS.to_string())
-        .stdout(Stdio::from(packaging_log_file.try_clone()?))
-        .stderr(Stdio::from(packaging_log_file));
-
-    use std::os::windows::process::CommandExt;
-    packaging_command.creation_flags(CREATE_NO_WINDOW_FLAG);
-
-    packaging_command.spawn()?;
-
-    println!(
-        "cargo:warning=Watch release packaging scheduled. The distributable installer will be written to {} after linking finishes. Packaging log: {}",
-        dist_directory.join("WatchSetup.exe").display(),
-        packaging_log_path.display()
-    );
 
     Ok(())
 }
