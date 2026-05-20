@@ -115,6 +115,8 @@ const SOURCE_PROVIDER_SETTINGS_MAX_HEIGHT: f32 = 132.0;
 const ALLANIME_PROVIDER_ID: &str = "builtin-allanime";
 const ALLANIME_PROVIDER_NAME: &str = "AllAnime";
 const ALLANIME_SOURCE_URL_PREFIX: &str = "allanime://";
+const SOURCE_SEARCH_SUGGESTION_LIMIT: usize = 8;
+const SOURCE_SEARCH_POPULAR_HISTORY_LIMIT: usize = 48;
 const LIVE_CAPTURE_DROPDOWN_WIDTH: f32 = 360.0;
 const LIBRARY_ACTION_GROUP_ESTIMATED_WIDTH: f32 = 448.0;
 const LIBRARY_LIVE_CAPTURE_OVERLAY_TOP: f32 = 74.0;
@@ -399,7 +401,11 @@ impl LoadedMedia {
     fn display_detail(&self) -> String {
         match &self.source {
             LoadedMediaSource::File(path) => {
-                if let Some(parent_name) = path.parent().and_then(|p| p.file_name()).and_then(|os| os.to_str()) {
+                if let Some(parent_name) = path
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .and_then(|os| os.to_str())
+                {
                     format!("📁 {}", parent_name)
                 } else {
                     path.display().to_string()
@@ -1221,6 +1227,27 @@ struct WatchPlayer {
     playback_process: Option<Child>,
     playback_ipc_path: Option<String>,
     playback_log_path: Option<PathBuf>,
+}
+
+fn extract_episode_number(title: &str) -> Option<f64> {
+    let mut current_num = String::new();
+    let mut found_num = None;
+    for c in title.chars() {
+        if c.is_ascii_digit() || c == '.' {
+            current_num.push(c);
+        } else if !current_num.is_empty() {
+            if let Ok(num) = current_num.parse::<f64>() {
+                found_num = Some(num);
+            }
+            current_num.clear();
+        }
+    }
+    if !current_num.is_empty() {
+        if let Ok(num) = current_num.parse::<f64>() {
+            found_num = Some(num);
+        }
+    }
+    found_num
 }
 
 impl WatchPlayer {
@@ -2817,56 +2844,11 @@ impl WatchPlayer {
     fn render_type_ahead_suggestions(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let current_input = self.source_search_input.read(cx).text().trim().to_string();
         let current_input_lower = current_input.to_lowercase();
-
-        const POPULAR_TITLES: &[&str] = &[
-            "One Piece",
-            "Naruto Shippuden",
-            "Attack on Titan",
-            "Demon Slayer: Kimetsu no Yaiba",
-            "Jujutsu Kaisen",
-            "My Hero Academia",
-            "Death Note",
-            "Fullmetal Alchemist: Brotherhood",
-            "Bleach: Thousand-Year Blood War",
-            "Hunter x Hunter",
-            "Steins;Gate",
-            "Chainsaw Man",
-            "Spy x Family",
-            "Solo Leveling",
-            "Frieren: Beyond Journey's End",
-            "Kaguya-sama: Love is War",
-            "Your Name",
-            "Spirited Away",
-            "Cowboy Bebop",
-            "Neon Genesis Evangelion",
-            "Cyberpunk: Edgerunners",
-            "Monster",
-            "Code Geass: Lelouch of the Rebellion",
-            "Mob Psycho 100",
-            "Vinland Saga",
-        ];
-
-        // Filter titles
-        let matched_titles: Vec<&str> = if current_input.is_empty() {
-            POPULAR_TITLES.iter().take(8).cloned().collect()
-        } else {
-            POPULAR_TITLES
-                .iter()
-                .filter(|&&title| {
-                    let title_lower = title.to_lowercase();
-                    if title_lower.contains(&current_input_lower) {
-                        return true;
-                    }
-                    let words: Vec<&str> = current_input_lower.split_whitespace().collect();
-                    if !words.is_empty() && words.iter().all(|&word| title_lower.contains(word)) {
-                        return true;
-                    }
-                    false
-                })
-                .take(10)
-                .cloned()
-                .collect()
-        };
+        let suggestion_groups =
+            source_search_suggestion_groups(&self.library, &current_input_lower);
+        let has_suggestions = suggestion_groups
+            .iter()
+            .any(|group| !group.titles.is_empty());
 
         div()
             .id("type-ahead-suggestions")
@@ -2874,67 +2856,71 @@ impl WatchPlayer {
             .flex_col()
             .gap_4()
             .p_1()
-            .child(
-                // Titles Section
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(MUTED_TEXT))
-                            .child("Popular Suggestions")
-                    )
-                    .child(
-                        if matched_titles.is_empty() {
-                            div().text_xs().text_color(rgb(MUTED_TEXT)).child("No matching popular titles.")
-                        } else {
+            .children(suggestion_groups.into_iter().filter_map(|group| {
+                if group.titles.is_empty() {
+                    return None;
+                }
+
+                Some(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(
                             div()
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .children(matched_titles.into_iter().map(|title| {
-                                    div()
-                                        .id(format!("suggest-{title}"))
-                                        .flex()
-                                        .items_center()
-                                        .justify_between()
-                                        .px_2()
-                                        .py_2()
-                                        .rounded_sm()
-                                        .hover(|style| {
-                                            style.bg(rgb(0x121212))
-                                        })
-                                        .cursor_pointer()
-                                        .on_click(cx.listener(move |player, _, window, cx| {
-                                            player.select_suggestion(title, window, cx);
-                                            cx.stop_propagation();
-                                        }))
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .items_center()
-                                                .gap_2()
-                                                .child(
-                                                    svg()
-                                                        .external_path(crate::icon_path(ICON_SEARCH))
-                                                        .w(px(14.0))
-                                                        .h(px(14.0))
-                                                        .text_color(rgb(MUTED_TEXT)),
-                                                )
-                                                .child(title.to_string()),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(rgb(MUTED_TEXT))
-                                                .child("Suggest")
-                                        )
-                                }))
-                        }
-                    )
-            )
+                                .text_xs()
+                                .text_color(rgb(MUTED_TEXT))
+                                .child(group.label),
+                        )
+                        .child(div().flex().flex_col().gap_1().children(
+                            group.titles.into_iter().map(|title| {
+                                let suggestion_title = title.clone();
+                                div()
+                                    .id(format!("suggest-{}-{}", group.label, title))
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .px_2()
+                                    .py_2()
+                                    .rounded_sm()
+                                    .hover(|style| style.bg(rgb(0x121212)))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |player, _, window, cx| {
+                                        player.select_suggestion(&suggestion_title, window, cx);
+                                        cx.stop_propagation();
+                                    }))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(
+                                                svg()
+                                                    .external_path(crate::icon_path(ICON_SEARCH))
+                                                    .w(px(14.0))
+                                                    .h(px(14.0))
+                                                    .text_color(rgb(MUTED_TEXT)),
+                                            )
+                                            .child(title),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(MUTED_TEXT))
+                                            .child("Suggest"),
+                                    )
+                            }),
+                        )),
+                )
+            }))
+            .when(!has_suggestions, |suggestions| {
+                suggestions.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(MUTED_TEXT))
+                        .child("No matching recent or popular titles."),
+                )
+            })
     }
 
     fn search_source_providers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2975,6 +2961,15 @@ impl WatchPlayer {
         cx.spawn_in(window, async move |this, cx| {
             let search_results = search_task.await;
 
+            let mut thumbnail_urls = Vec::new();
+            if let Ok(results) = &search_results {
+                thumbnail_urls = results
+                    .iter()
+                    .filter_map(|res| res.thumbnail_url.clone())
+                    .filter(|url| !url.is_empty())
+                    .collect::<Vec<_>>();
+            }
+
             let _ = this.update_in(cx, |player, _window, cx| {
                 player.is_source_search_pending = false;
                 match search_results {
@@ -2999,6 +2994,19 @@ impl WatchPlayer {
                 }
                 cx.notify();
             });
+
+            let mut tasks = Vec::new();
+            for url in thumbnail_urls {
+                tasks.push(cx.background_spawn(async move { cache_remote_thumbnail(&url) }));
+            }
+
+            for task in tasks {
+                if task.await.is_some() {
+                    let _ = this.update_in(cx, |_, _, cx| {
+                        cx.notify();
+                    });
+                }
+            }
         })
         .detach();
     }
@@ -3108,10 +3116,21 @@ impl WatchPlayer {
         cx.spawn_in(window, async move |this, cx| {
             let episode_results = episode_task.await;
 
-            let _ = this.update_in(cx, |player, _window, cx| {
+            let _ = this.update_in(cx, |player, window, cx| {
                 player.is_source_search_pending = false;
                 match episode_results {
-                    Ok(results) => {
+                    Ok(mut results) => {
+                        results.sort_by(|a, b| {
+                            let left_order = source_episode_order_number(&a.title).unwrap_or(0.0);
+                            let right_order = source_episode_order_number(&b.title).unwrap_or(0.0);
+
+                            left_order
+                                .partial_cmp(&right_order)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        });
+
+                        let latest_episode = results.last().cloned();
+
                         let episode_count = results.len();
                         player.source_episode_results = results;
                         player.selected_source_result_index = 0;
@@ -3124,6 +3143,10 @@ impl WatchPlayer {
                             }
                             .into(),
                         );
+
+                        if let Some(latest) = latest_episode {
+                            player.load_source_episode_result(latest, window, cx);
+                        }
                     }
                     Err(error_message) => {
                         player.source_episode_results.clear();
@@ -3493,12 +3516,19 @@ impl WatchPlayer {
         self.is_live_capture_menu_open = false;
         self.open_context_menu_section = None;
         self.reveal_controls(window, cx);
-        let Some(media_path) = video_file_dialog("Play file").pick_file() else {
+        let Some(media_paths) = video_file_dialog("Play file").pick_files() else {
             return;
         };
 
-        if is_video_path(&media_path) || is_playlist_path(&media_path) {
-            self.load_media_paths(media_paths_from_path(media_path), window, cx);
+        if !media_paths.is_empty() {
+            let processed_paths = media_paths
+                .into_iter()
+                .flat_map(media_paths_from_path)
+                .collect::<Vec<_>>();
+
+            if !processed_paths.is_empty() {
+                self.load_media_paths(processed_paths, window, cx);
+            }
         }
         self.reveal_controls(window, cx);
     }
@@ -3524,37 +3554,6 @@ impl WatchPlayer {
             let media_paths = paths
                 .into_iter()
                 .flat_map(|path| media_paths_in_folder(&path))
-                .collect::<Vec<_>>();
-
-            let _ = this.update_in(cx, |player, window, cx| {
-                player.load_media_paths(media_paths, window, cx);
-                player.reveal_controls(window, cx);
-            });
-        })
-        .detach();
-    }
-
-    fn open_queue_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.is_main_menu_open = false;
-        self.is_subtitle_menu_open = false;
-        self.is_live_capture_menu_open = false;
-        self.open_context_menu_section = None;
-        self.reveal_controls(window, cx);
-        let path_selection = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: true,
-            multiple: true,
-            prompt: Some("Build play queue".into()),
-        });
-
-        cx.spawn_in(window, async move |this, cx| {
-            let Ok(Ok(Some(paths))) = path_selection.await else {
-                return;
-            };
-
-            let media_paths = paths
-                .into_iter()
-                .flat_map(media_paths_from_path)
                 .collect::<Vec<_>>();
 
             let _ = this.update_in(cx, |player, window, cx| {
@@ -4180,7 +4179,9 @@ impl WatchPlayer {
             return;
         };
 
-        let clamped_start_position_seconds = if current_media.is_seekable_file() {
+        let is_seekable =
+            current_media.is_seekable_file() || current_media.internet_media().is_some();
+        let clamped_start_position_seconds = if is_seekable {
             self.current_media_duration_seconds()
                 .map(|duration_seconds| start_position_seconds.clamp(0.0, duration_seconds))
                 .unwrap_or_else(|| start_position_seconds.max(0.0))
@@ -4225,7 +4226,7 @@ impl WatchPlayer {
             .stderr(Stdio::null());
         hide_child_process_window(&mut command);
 
-        if current_media.is_seekable_file() && clamped_start_position_seconds > 0.0 {
+        if is_seekable && clamped_start_position_seconds > 0.0 {
             command.arg(format!("--start={clamped_start_position_seconds:.3}"));
         }
         current_media.append_mpv_input_args(&mut command, &self.settings);
@@ -4517,6 +4518,27 @@ impl WatchPlayer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if history_entry
+            .path
+            .to_string_lossy()
+            .starts_with("internet-")
+        {
+            if let Some(entry) = self
+                .library
+                .internet_media_history
+                .iter()
+                .find(|entry| internet_media_library_path(&entry.media) == history_entry.path)
+            {
+                self.continue_internet_media(
+                    entry.media.clone(),
+                    history_entry.playback_position_seconds,
+                    window,
+                    cx,
+                );
+                return;
+            }
+        }
+
         let media_paths = history_entry
             .path
             .parent()
@@ -4537,6 +4559,40 @@ impl WatchPlayer {
             window,
             cx,
         );
+        self.reveal_controls(window, cx);
+    }
+
+    fn continue_internet_media(
+        &mut self,
+        internet_media: InternetMedia,
+        position_seconds: f64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending_watch_session = None;
+        clear_saved_watch_session();
+        self.record_current_media_progress();
+        self.flush_player_library_if_due(true);
+        self.stop_playback_process();
+        self.playback_queue = vec![build_internet_media(internet_media.clone())];
+        self.current_queue_index = Some(0);
+        self.selected_audio_track_id = None;
+        self.selected_subtitle_path = None;
+        self.selected_embedded_subtitle_track_id = None;
+        self.playback_position_seconds = position_seconds;
+        self.is_eof_reached = false;
+        self.is_library_open = false;
+        self.is_live_capture_menu_open = false;
+        self.is_source_search_open = false;
+        promote_recent_internet_media(
+            &mut self.library.recent_internet_media,
+            internet_media,
+            MAX_RECENT_MEDIA,
+        );
+        self.mark_library_dirty();
+        save_player_library_atomic(&self.library);
+        self.schedule_internet_library_thumbnail_cache(window, cx);
+        self.start_current_media_playback_at_position(position_seconds, window, cx);
         self.reveal_controls(window, cx);
     }
 
@@ -5934,6 +5990,9 @@ impl WatchPlayer {
         self.library
             .media_history
             .retain(|entry| entry.path != media_path);
+        self.library
+            .internet_media_history
+            .retain(|entry| internet_media_library_path(&entry.media) != media_path);
         if self.hovered_continue_remove_media_path.as_ref() == Some(&media_path) {
             self.hovered_continue_remove_media_path = None;
         }
@@ -6176,13 +6235,32 @@ impl WatchPlayer {
             .text_color(rgb(SOFT_WHITE));
 
         if let Some(internet_media) = internet_media {
+            let is_in_continue_watching = self.library.internet_media_history.iter().any(|entry| {
+                internet_media_library_path(&entry.media)
+                    == internet_media_library_path(&internet_media)
+                    && !entry.is_completed
+                    && entry.playback_position_seconds >= MINIMUM_RESUME_POSITION_SECONDS
+            });
+
+            let internet_media_for_remove = internet_media.clone();
             menu.child(simple_menu_action(
                 "Remove",
                 cx,
                 move |player, _window, cx| {
-                    player.remove_internet_media_from_library(internet_media.clone(), cx);
+                    player
+                        .remove_internet_media_from_library(internet_media_for_remove.clone(), cx);
                 },
             ))
+            .when(is_in_continue_watching, |menu| {
+                let media_path = internet_media_library_path(&internet_media);
+                menu.child(simple_menu_action(
+                    "Remove from Continue Watching",
+                    cx,
+                    move |player, _window, cx| {
+                        player.dismiss_continue_watching_entry(media_path.clone(), cx);
+                    },
+                ))
+            })
         } else {
             let is_in_continue_watching = self.library.media_history.iter().any(|entry| {
                 entry.path == media_path
@@ -6218,9 +6296,13 @@ impl WatchPlayer {
             }))
             .when(is_in_continue_watching, |menu| {
                 let media_path = media_path.clone();
-                menu.child(simple_menu_action("Remove", cx, move |player, _window, cx| {
-                    player.dismiss_continue_watching_entry(media_path.clone(), cx);
-                }))
+                menu.child(simple_menu_action(
+                    "Remove",
+                    cx,
+                    move |player, _window, cx| {
+                        player.dismiss_continue_watching_entry(media_path.clone(), cx);
+                    },
+                ))
             })
         }
     }
@@ -6269,6 +6351,10 @@ impl WatchPlayer {
         let has_episode_badge = episode_badge.is_some();
         let item_title = item.title.clone();
         let has_item_title = !item_title.is_empty();
+        let progress_badge = item
+            .resume_history_entry
+            .as_ref()
+            .map(|entry| format_timestamp(entry.playback_position_seconds));
         let title_overlay_width = if has_episode_badge {
             (card_width - (66.0 * library_scale)).max(1.0)
         } else {
@@ -6456,7 +6542,7 @@ impl WatchPlayer {
                             )
                         },
                     )
-                    .when(has_item_title, |frame| {
+                    .when(has_item_title && !has_episode_badge, |frame| {
                         frame.child(
                             div()
                                 .absolute()
@@ -6479,6 +6565,27 @@ impl WatchPlayer {
                                         library_scale,
                                     ),
                                 )),
+                        )
+                    })
+                    .when_some(progress_badge, |frame, progress_time| {
+                        frame.child(
+                            div()
+                                .absolute()
+                                .left(px(8.0 * library_scale))
+                                .bottom(px(8.0 * library_scale))
+                                .px(px(6.0 * library_scale))
+                                .py(px(3.0 * library_scale))
+                                .text_size(px(10.0 * library_scale))
+                                .line_height(px(12.0 * library_scale))
+                                .text_color(rgb(SOFT_WHITE))
+                                .rounded_sm()
+                                .bg(linear_gradient(
+                                    135.0,
+                                    linear_color_stop(rgb_alpha(OLED_BLACK, 0.62), 0.0),
+                                    linear_color_stop(rgb_alpha(OLED_BLACK, 0.18), 1.0),
+                                ))
+                                .shadow_lg()
+                                .child(progress_time),
                         )
                     })
                     .when(is_internet_media, |frame| {
@@ -7045,15 +7152,12 @@ impl WatchPlayer {
                     )
                     .child(self.render_playback_mode_toggles("main-menu", cx)),
             )
-            .child(simple_menu_action_with_icon("Open File", ICON_FILE, cx, |player, window, cx| {
-                player.open_file_picker(window, cx);
-            }))
             .child(simple_menu_action_with_icon(
-                "Open Multiple Files",
+                "Open File",
                 ICON_FILE,
                 cx,
                 |player, window, cx| {
-                    player.open_queue_picker(window, cx);
+                    player.open_file_picker(window, cx);
                 },
             ))
             .child(simple_menu_action_with_icon(
@@ -7076,12 +7180,22 @@ impl WatchPlayer {
             .when(is_queue_open, |menu| {
                 menu.child(self.render_queue_selector(cx))
             })
-            .child(simple_menu_action_with_icon("Library", ICON_GLOBE, cx, |player, window, cx| {
-                player.reveal_library_mode(window, cx);
-            }))
-            .child(simple_menu_action_with_icon("Settings", ICON_SETTINGS, cx, |player, window, cx| {
-                player.open_settings_modal(window, cx);
-            }))
+            .child(simple_menu_action_with_icon(
+                "Library",
+                ICON_GLOBE,
+                cx,
+                |player, window, cx| {
+                    player.reveal_library_mode(window, cx);
+                },
+            ))
+            .child(simple_menu_action_with_icon(
+                "Settings",
+                ICON_SETTINGS,
+                cx,
+                |player, window, cx| {
+                    player.open_settings_modal(window, cx);
+                },
+            ))
     }
 
     fn subtitle_context_menu_origin(
@@ -7573,13 +7687,23 @@ impl WatchPlayer {
                     .items_center()
                     .justify_center()
                     .overflow_hidden()
-                    .when_some(thumbnail_url, |thumbnail, thumbnail_url| {
-                        thumbnail.child(
-                            img(thumbnail_url)
-                                .w_full()
-                                .h_full()
-                                .object_fit(ObjectFit::Cover),
-                        )
+                    .when_some(thumbnail_url, |thumbnail, url| {
+                        if let Some(cached_path) = existing_remote_thumbnail_path(&url) {
+                            thumbnail.child(
+                                img(cached_path.display().to_string())
+                                    .w_full()
+                                    .h_full()
+                                    .object_fit(ObjectFit::Cover),
+                            )
+                        } else {
+                            thumbnail.child(
+                                svg()
+                                    .external_path(crate::icon_path(ICON_GLOBE))
+                                    .w(px(18.0))
+                                    .h(px(18.0))
+                                    .text_color(rgb(SOFT_WHITE)),
+                            )
+                        }
                     })
                     .when(!has_thumbnail_url, |thumbnail| {
                         thumbnail.child(
@@ -7928,49 +8052,55 @@ impl WatchPlayer {
             .flex()
             .flex_col()
             .gap_1()
-            .children(
-                tabs.into_iter().map(|tab| {
-                    let is_active = self.active_settings_tab == tab;
-                    div()
-                        .id(format!("settings-tab-{}", tab.label()))
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .px_3()
-                        .py_2()
-                        .rounded_sm()
-                        .cursor_pointer()
-                        .bg(if is_active {
-                            rgb_alpha(VLC_ORANGE, 0.08)
+            .children(tabs.into_iter().map(|tab| {
+                let is_active = self.active_settings_tab == tab;
+                div()
+                    .id(format!("settings-tab-{}", tab.label()))
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .px_3()
+                    .py_2()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .bg(if is_active {
+                        rgb_alpha(VLC_ORANGE, 0.08)
+                    } else {
+                        rgb_alpha(OLED_BLACK, 0.0)
+                    })
+                    .hover(|style| {
+                        if !is_active {
+                            style.bg(rgb(0x121212))
                         } else {
-                            rgb_alpha(OLED_BLACK, 0.0)
-                        })
-                        .hover(|style| {
-                            if !is_active {
-                                style.bg(rgb(0x121212))
+                            style
+                        }
+                    })
+                    .on_click(cx.listener(move |player, _, _window, cx| {
+                        player.active_settings_tab = tab;
+                        cx.notify();
+                    }))
+                    .child(
+                        svg()
+                            .external_path(crate::icon_path(tab.icon()))
+                            .w(px(16.0))
+                            .h(px(16.0))
+                            .text_color(if is_active {
+                                rgb(VLC_ORANGE)
                             } else {
-                                style
-                            }
-                        })
-                        .on_click(cx.listener(move |player, _, _window, cx| {
-                            player.active_settings_tab = tab;
-                            cx.notify();
-                        }))
-                        .child(
-                            svg()
-                                .external_path(crate::icon_path(tab.icon()))
-                                .w(px(16.0))
-                                .h(px(16.0))
-                                .text_color(if is_active { rgb(VLC_ORANGE) } else { rgb(SOFT_WHITE) })
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(if is_active { rgb(VLC_ORANGE) } else { rgb(SOFT_WHITE) })
-                                .child(tab.label())
-                        )
-                })
-            )
+                                rgb(SOFT_WHITE)
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(if is_active {
+                                rgb(VLC_ORANGE)
+                            } else {
+                                rgb(SOFT_WHITE)
+                            })
+                            .child(tab.label()),
+                    )
+            }))
     }
 
     fn render_settings_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -8023,7 +8153,12 @@ impl WatchPlayer {
                     .flex_1()
                     .gap_0p5()
                     .child(div().text_sm().child(label))
-                    .child(div().text_xs().text_color(rgb(MUTED_TEXT)).child(description))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(MUTED_TEXT))
+                            .child(description),
+                    ),
             )
             .child(
                 div()
@@ -8033,7 +8168,11 @@ impl WatchPlayer {
                     .rounded_full()
                     .p_0p5()
                     .cursor_pointer()
-                    .bg(if value { rgb(VLC_ORANGE) } else { rgb(0x282828) })
+                    .bg(if value {
+                        rgb(VLC_ORANGE)
+                    } else {
+                        rgb(0x282828)
+                    })
                     .on_click(cx.listener(move |player, _event, window, cx| {
                         on_toggle(player, window, cx);
                     }))
@@ -8043,8 +8182,8 @@ impl WatchPlayer {
                             .h(px(14.0))
                             .rounded_full()
                             .bg(rgb(SOFT_WHITE))
-                            .when(value, |thumb| thumb.ml(px(16.0)))
-                    )
+                            .when(value, |thumb| thumb.ml(px(16.0))),
+                    ),
             )
     }
 
@@ -8074,7 +8213,12 @@ impl WatchPlayer {
                     .flex_col()
                     .gap_0p5()
                     .child(div().text_sm().child(label))
-                    .child(div().text_xs().text_color(rgb(MUTED_TEXT)).child(description))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(MUTED_TEXT))
+                            .child(description),
+                    ),
             )
             .child(
                 div()
@@ -8084,8 +8228,8 @@ impl WatchPlayer {
                     .rounded_sm()
                     .border_1()
                     .border_color(rgb(FINE_BORDER))
-                    .children(
-                        options.into_iter().enumerate().map(|(idx, (option_label, option_val))| {
+                    .children(options.into_iter().enumerate().map(
+                        |(idx, (option_label, option_val))| {
                             let is_selected = option_val == current_value;
                             let on_change = Arc::clone(&on_change);
                             let option_val_clone = option_val.clone();
@@ -8122,10 +8266,10 @@ impl WatchPlayer {
                                         } else {
                                             rgb(SOFT_WHITE)
                                         })
-                                        .child(option_label)
+                                        .child(option_label),
                                 )
-                        })
-                    )
+                        },
+                    )),
             )
     }
 
@@ -8154,44 +8298,51 @@ impl WatchPlayer {
                     .flex_1()
                     .gap_0p5()
                     .child(div().text_sm().child("Subtitle Color"))
-                    .child(div().text_xs().text_color(rgb(MUTED_TEXT)).child("Foreground color of the subtitles."))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(MUTED_TEXT))
+                            .child("Foreground color of the subtitles."),
+                    ),
             )
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap_3()
-                    .children(
-                        colors.into_iter().map(|(hex, name, rgb_val)| {
-                            let is_selected = current_color == hex;
-                            div()
-                                .id(format!("color-{}", name))
-                                .w(px(22.0))
-                                .h(px(22.0))
-                                .rounded_full()
-                                .border_2()
-                                .border_color(if is_selected { rgb(VLC_ORANGE) } else { rgb_alpha(OLED_BLACK, 0.0) })
-                                .cursor_pointer()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .hover(|style| style.border_color(rgb(VLC_ORANGE)))
-                                .on_click(cx.listener(move |player, _event, window, cx| {
-                                    player.settings.subtitle_color = hex.to_string();
-                                    save_player_settings(&player.settings);
-                                    player.apply_subtitle_style_in_backend();
-                                    player.show_osd(format!("Subtitle color {name}"), window, cx);
-                                    cx.notify();
-                                }))
-                                .child(
-                                    div()
-                                        .w(px(14.0))
-                                        .h(px(14.0))
-                                        .rounded_full()
-                                        .bg(rgb(rgb_val))
-                                )
-                        })
-                    )
+                    .children(colors.into_iter().map(|(hex, name, rgb_val)| {
+                        let is_selected = current_color == hex;
+                        div()
+                            .id(format!("color-{}", name))
+                            .w(px(22.0))
+                            .h(px(22.0))
+                            .rounded_full()
+                            .border_2()
+                            .border_color(if is_selected {
+                                rgb(VLC_ORANGE)
+                            } else {
+                                rgb_alpha(OLED_BLACK, 0.0)
+                            })
+                            .cursor_pointer()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .hover(|style| style.border_color(rgb(VLC_ORANGE)))
+                            .on_click(cx.listener(move |player, _event, window, cx| {
+                                player.settings.subtitle_color = hex.to_string();
+                                save_player_settings(&player.settings);
+                                player.apply_subtitle_style_in_backend();
+                                player.show_osd(format!("Subtitle color {name}"), window, cx);
+                                cx.notify();
+                            }))
+                            .child(
+                                div()
+                                    .w(px(14.0))
+                                    .h(px(14.0))
+                                    .rounded_full()
+                                    .bg(rgb(rgb_val)),
+                            )
+                    })),
             )
     }
 
@@ -8212,7 +8363,12 @@ impl WatchPlayer {
                     .flex_1()
                     .gap_0p5()
                     .child(div().text_sm().child("Default Volume"))
-                    .child(div().text_xs().text_color(rgb(MUTED_TEXT)).child("Initial volume level for newly loaded media files."))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(MUTED_TEXT))
+                            .child("Initial volume level for newly loaded media files."),
+                    ),
             )
             .child(
                 div()
@@ -8230,7 +8386,7 @@ impl WatchPlayer {
                             .w(px(36.0))
                             .text_right()
                             .child(format!("{}%", self.settings.default_volume_percent)),
-                    )
+                    ),
             )
     }
 
@@ -8264,8 +8420,12 @@ impl WatchPlayer {
                 self.settings.start_fullscreen,
                 cx,
                 |player, window, cx| {
-                    player.set_start_fullscreen_setting(!player.settings.start_fullscreen, window, cx);
-                }
+                    player.set_start_fullscreen_setting(
+                        !player.settings.start_fullscreen,
+                        window,
+                        cx,
+                    );
+                },
             ))
             .child(self.render_settings_toggle(
                 "toggle-backdrop-blur",
@@ -8274,8 +8434,12 @@ impl WatchPlayer {
                 self.settings.is_backdrop_blur_enabled,
                 cx,
                 |player, window, cx| {
-                    player.set_backdrop_blur_setting(!player.settings.is_backdrop_blur_enabled, window, cx);
-                }
+                    player.set_backdrop_blur_setting(
+                        !player.settings.is_backdrop_blur_enabled,
+                        window,
+                        cx,
+                    );
+                },
             ))
             .child(self.render_settings_segments(
                 "segments-resume",
@@ -8286,7 +8450,7 @@ impl WatchPlayer {
                 cx,
                 |player, val, window, cx| {
                     player.set_resume_behavior_setting(val, window, cx);
-                }
+                },
             ))
             .child(self.render_settings_segments(
                 "segments-seek-step",
@@ -8298,7 +8462,7 @@ impl WatchPlayer {
                 |player, val, window, cx| {
                     player.settings.seek_step_seconds = val;
                     player.save_settings_and_show(format!("Seek step {} seconds", val), window, cx);
-                }
+                },
             ))
             .child(self.render_settings_segments(
                 "segments-volume-step",
@@ -8310,7 +8474,7 @@ impl WatchPlayer {
                 |player, val, window, cx| {
                     player.settings.volume_step_percent = val;
                     player.save_settings_and_show(format!("Volume step {}%", val), window, cx);
-                }
+                },
             ))
     }
 
@@ -8335,8 +8499,12 @@ impl WatchPlayer {
                 self.settings.is_lowest_latency_live_capture_enabled,
                 cx,
                 |player, window, cx| {
-                    player.set_lowest_latency_live_capture_setting(!player.settings.is_lowest_latency_live_capture_enabled, window, cx);
-                }
+                    player.set_lowest_latency_live_capture_setting(
+                        !player.settings.is_lowest_latency_live_capture_enabled,
+                        window,
+                        cx,
+                    );
+                },
             ))
             .child(self.render_settings_toggle(
                 "toggle-live-exclusive-audio",
@@ -8345,8 +8513,12 @@ impl WatchPlayer {
                 self.settings.is_live_capture_exclusive_audio_enabled,
                 cx,
                 |player, window, cx| {
-                    player.set_live_capture_exclusive_audio_setting(!player.settings.is_live_capture_exclusive_audio_enabled, window, cx);
-                }
+                    player.set_live_capture_exclusive_audio_setting(
+                        !player.settings.is_live_capture_exclusive_audio_enabled,
+                        window,
+                        cx,
+                    );
+                },
             ))
             .child(self.render_settings_segments(
                 "segments-audio-lang",
@@ -8357,7 +8529,7 @@ impl WatchPlayer {
                 cx,
                 |player, val, window, cx| {
                     player.set_preferred_audio_language_setting(val, window, cx);
-                }
+                },
             ))
             .child(
                 div()
@@ -8367,8 +8539,13 @@ impl WatchPlayer {
                     .flex_col()
                     .gap_1()
                     .child(div().text_sm().child("Audio Output Device"))
-                    .child(div().text_xs().text_color(rgb(MUTED_TEXT)).child("Select default device for audio playback."))
-                    .child(self.render_audio_device_inline_list(cx))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(MUTED_TEXT))
+                            .child("Select default device for audio playback."),
+                    )
+                    .child(self.render_audio_device_inline_list(cx)),
             )
     }
 
@@ -8383,42 +8560,57 @@ impl WatchPlayer {
             .rounded_sm()
             .border_1()
             .border_color(rgb(FINE_BORDER))
-            .children(
-                self.audio_output_devices.iter().map(|device| {
-                    let is_selected = device.device_id == *current_device_id;
-                    div()
-                        .id(format!("audio-device-{}", library_safe_element_key(&device.device_id)))
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .px_2()
-                        .py_1()
-                        .rounded_sm()
-                        .cursor_pointer()
-                        .bg(if is_selected {
-                            rgb_alpha(VLC_ORANGE, 0.12)
+            .children(self.audio_output_devices.iter().map(|device| {
+                let is_selected = device.device_id == *current_device_id;
+                div()
+                    .id(format!(
+                        "audio-device-{}",
+                        library_safe_element_key(&device.device_id)
+                    ))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .bg(if is_selected {
+                        rgb_alpha(VLC_ORANGE, 0.12)
+                    } else {
+                        rgb_alpha(OLED_BLACK, 0.0)
+                    })
+                    .hover(|style| {
+                        if !is_selected {
+                            style.bg(rgb(0x1a1a1a))
                         } else {
-                            rgb_alpha(OLED_BLACK, 0.0)
-                        })
-                        .hover(|style| {
-                            if !is_selected {
-                                style.bg(rgb(0x1a1a1a))
+                            style
+                        }
+                    })
+                    .on_click(cx.listener({
+                        let device_id = device.device_id.clone();
+                        move |player, _event, window, cx| {
+                            player.set_audio_output_device(device_id.clone(), window, cx);
+                        }
+                    }))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(if is_selected {
+                                rgb(VLC_ORANGE)
                             } else {
-                                style
-                            }
-                        })
-                        .on_click(cx.listener({
-                            let device_id = device.device_id.clone();
-                            move |player, _event, window, cx| {
-                                player.set_audio_output_device(device_id.clone(), window, cx);
-                            }
-                        }))
-                        .child(div().text_xs().text_color(if is_selected { rgb(VLC_ORANGE) } else { rgb(SOFT_WHITE) }).child(device.label.clone()))
-                        .when(is_selected, |row| {
-                            row.child(div().text_xs().text_color(rgb(VLC_ORANGE)).child("Selected"))
-                        })
-                })
-            )
+                                rgb(SOFT_WHITE)
+                            })
+                            .child(device.label.clone()),
+                    )
+                    .when(is_selected, |row| {
+                        row.child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(VLC_ORANGE))
+                                .child("Selected"),
+                        )
+                    })
+            }))
     }
 
     fn render_subtitles_tab_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -8460,7 +8652,7 @@ impl WatchPlayer {
                 cx,
                 |player, val, window, cx| {
                     player.set_hardware_decoding_setting(val, window, cx);
-                }
+                },
             ))
             .child(self.render_settings_segments(
                 "segments-subtitle-font-size",
@@ -8474,7 +8666,7 @@ impl WatchPlayer {
                     save_player_settings(&player.settings);
                     player.apply_subtitle_style_in_backend();
                     player.show_osd(format!("Subtitle size {}", val), window, cx);
-                }
+                },
             ))
             .child(self.render_subtitle_color_selector(cx))
             .child(self.render_settings_segments(
@@ -8489,7 +8681,7 @@ impl WatchPlayer {
                     save_player_settings(&player.settings);
                     player.apply_subtitle_style_in_backend();
                     player.show_osd(format!("Subtitle position {}%", val), window, cx);
-                }
+                },
             ))
             .child(self.render_settings_segments(
                 "segments-sub-lang",
@@ -8500,7 +8692,7 @@ impl WatchPlayer {
                 cx,
                 |player, val, window, cx| {
                     player.set_preferred_subtitle_language_setting(val, window, cx);
-                }
+                },
             ))
     }
 
@@ -8567,14 +8759,9 @@ impl WatchPlayer {
                             .flex_1()
                             .overflow_hidden()
                             .child(self.render_settings_sidebar(cx))
-                            .child(
-                                div()
-                                    .w(px(1.0))
-                                    .h_full()
-                                    .bg(rgb(FINE_BORDER))
-                            )
-                            .child(self.render_settings_content(cx))
-                    )
+                            .child(div().w(px(1.0)).h_full().bg(rgb(FINE_BORDER)))
+                            .child(self.render_settings_content(cx)),
+                    ),
             )
             .when_some(self.open_settings_selector, |backdrop, selector_kind| {
                 backdrop.child(self.render_settings_selector_overlay(selector_kind, cx))
@@ -8703,25 +8890,23 @@ impl WatchPlayer {
             .flex_col()
             .gap_0()
             .pl_2()
-            .child(simple_menu_action("Open File", cx, |player, window, cx| {
-                player.open_file_picker(window, cx);
-            }))
-            .child(simple_menu_action(
-                "Open Multiple Files",
+            .child(simple_menu_action_with_icon(
+                "Open File",
+                ICON_FILE,
                 cx,
                 |player, window, cx| {
-                    player.open_queue_picker(window, cx);
+                    player.open_file_picker(window, cx);
                 },
             ))
-            .child(simple_menu_action(
+            .child(simple_menu_action_with_icon(
                 "Open Folder",
+                ICON_FOLDER,
                 cx,
                 |player, window, cx| {
                     player.open_folder_picker(window, cx);
                 },
             ))
     }
-
 
     fn render_source_provider_settings_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let provider_count = self.settings.source_providers.len();
@@ -9074,7 +9259,6 @@ impl WatchPlayer {
             .collect()
     }
 
-
     fn render_settings_action_row(
         &self,
         label: &'static str,
@@ -9207,6 +9391,33 @@ impl WatchPlayer {
             ))
     }
 
+    fn render_selection_radio_indicator(&self, is_selected: bool) -> impl IntoElement {
+        div()
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(14.0))
+            .h(px(14.0))
+            .rounded_full()
+            .border_1()
+            .border_color(if is_selected {
+                rgb(VLC_ORANGE)
+            } else {
+                rgb(MUTED_TEXT)
+            })
+            .child(
+                div()
+                    .w(px(6.0))
+                    .h(px(6.0))
+                    .rounded_full()
+                    .bg(if is_selected {
+                        rgb(VLC_ORANGE)
+                    } else {
+                        rgb_alpha(OLED_BLACK, 0.0)
+                    }),
+            )
+    }
+
     fn render_audio_track_row(
         &self,
         audio_track: AudioTrack,
@@ -9244,7 +9455,7 @@ impl WatchPlayer {
                     .child(div().text_sm().truncate().child(audio_track.title))
                     .child(div().text_xs().text_color(rgb(MUTED_TEXT)).child(detail)),
             )
-            .child(if is_selected { "selected" } else { "" })
+            .child(self.render_selection_radio_indicator(is_selected))
     }
 
     fn render_embedded_subtitle_track_row(
@@ -9286,7 +9497,7 @@ impl WatchPlayer {
                     .child(div().text_sm().child(subtitle_track.title))
                     .child(div().text_xs().text_color(rgb(MUTED_TEXT)).child(detail)),
             )
-            .child(if is_selected { "selected" } else { "" })
+            .child(self.render_selection_radio_indicator(is_selected))
     }
 
     fn render_subtitle_path_row(
@@ -9333,13 +9544,20 @@ impl WatchPlayer {
                     .flex_1()
                     .child(div().text_sm().child(display_name(&subtitle_path)))
                     .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(MUTED_TEXT))
-                            .child(subtitle_path.display().to_string()),
+                        div().text_xs().text_color(rgb(MUTED_TEXT)).child(
+                            if let Some(parent_name) = subtitle_path
+                                .parent()
+                                .and_then(|p| p.file_name())
+                                .and_then(|os| os.to_str())
+                            {
+                                format!("📁 {parent_name}")
+                            } else {
+                                subtitle_path.display().to_string()
+                            },
+                        ),
                     ),
             )
-            .child(if is_selected { "selected" } else { "" })
+            .child(self.render_selection_radio_indicator(is_selected))
     }
 }
 
@@ -12540,6 +12758,168 @@ fn default_audio_output_options() -> Vec<AudioOutputDeviceOption> {
     }]
 }
 
+struct SourceSearchSuggestionGroup {
+    label: &'static str,
+    titles: Vec<String>,
+}
+
+const FALLBACK_POPULAR_SEARCH_TITLES: &[&str] = &[
+    "Breaking Bad",
+    "The Office",
+    "Game of Thrones",
+    "Dune",
+    "Oppenheimer",
+    "Interstellar",
+    "The Dark Knight",
+    "Stranger Things",
+    "One Piece",
+    "Attack on Titan",
+    "The Matrix",
+    "Inception",
+    "Avatar",
+    "The Witcher",
+    "House of the Dragon",
+    "Better Call Saul",
+];
+
+fn source_search_suggestion_title(media: &InternetMedia) -> String {
+    media
+        .series_title
+        .clone()
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or_else(|| media.title.clone())
+}
+
+fn source_search_title_matches_filter(title: &str, filter_lower: &str) -> bool {
+    if filter_lower.is_empty() {
+        return true;
+    }
+
+    let title_lower = title.to_lowercase();
+    if title_lower.contains(filter_lower) {
+        return true;
+    }
+
+    let words = filter_lower.split_whitespace().collect::<Vec<_>>();
+    !words.is_empty() && words.iter().all(|word| title_lower.contains(word))
+}
+
+fn push_unique_suggestion_title(titles: &mut Vec<String>, candidate: String, limit: usize) {
+    let trimmed_candidate = candidate.trim();
+    if trimmed_candidate.is_empty() || titles.len() >= limit {
+        return;
+    }
+
+    let candidate_key = trimmed_candidate.to_ascii_lowercase();
+    if titles
+        .iter()
+        .any(|title| title.to_ascii_lowercase() == candidate_key)
+    {
+        return;
+    }
+
+    titles.push(trimmed_candidate.to_string());
+}
+
+fn source_search_suggestion_groups(
+    library: &PlayerLibrary,
+    filter_lower: &str,
+) -> Vec<SourceSearchSuggestionGroup> {
+    let mut recent_titles = Vec::new();
+    for media in &library.recent_internet_media {
+        let title = source_search_suggestion_title(media);
+        if source_search_title_matches_filter(&title, filter_lower) {
+            push_unique_suggestion_title(&mut recent_titles, title, SOURCE_SEARCH_SUGGESTION_LIMIT);
+        }
+    }
+
+    let mut popular_counts = HashMap::<String, (String, usize)>::new();
+    for entry in library
+        .internet_media_history
+        .iter()
+        .take(SOURCE_SEARCH_POPULAR_HISTORY_LIMIT)
+    {
+        let title = source_search_suggestion_title(&entry.media);
+        if !source_search_title_matches_filter(&title, filter_lower) {
+            continue;
+        }
+        let title_key = title.to_ascii_lowercase();
+        popular_counts
+            .entry(title_key)
+            .and_modify(|(_, play_count)| *play_count += 1)
+            .or_insert((title, 1));
+    }
+
+    let mut ranked_popular = popular_counts.into_values().collect::<Vec<_>>();
+    ranked_popular.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+
+    let mut popular_titles = Vec::new();
+    for (title, _) in ranked_popular {
+        if recent_titles
+            .iter()
+            .any(|recent_title| recent_title.eq_ignore_ascii_case(&title))
+        {
+            continue;
+        }
+        push_unique_suggestion_title(&mut popular_titles, title, SOURCE_SEARCH_SUGGESTION_LIMIT);
+    }
+
+    if filter_lower.is_empty() {
+        for title in FALLBACK_POPULAR_SEARCH_TITLES {
+            if recent_titles
+                .iter()
+                .any(|recent_title| recent_title.eq_ignore_ascii_case(title))
+                || popular_titles
+                    .iter()
+                    .any(|popular_title| popular_title.eq_ignore_ascii_case(title))
+            {
+                continue;
+            }
+            push_unique_suggestion_title(
+                &mut popular_titles,
+                title.to_string(),
+                SOURCE_SEARCH_SUGGESTION_LIMIT,
+            );
+        }
+    } else {
+        for title in FALLBACK_POPULAR_SEARCH_TITLES {
+            if !source_search_title_matches_filter(title, filter_lower) {
+                continue;
+            }
+            if recent_titles
+                .iter()
+                .any(|recent_title| recent_title.eq_ignore_ascii_case(title))
+                || popular_titles
+                    .iter()
+                    .any(|popular_title| popular_title.eq_ignore_ascii_case(title))
+            {
+                continue;
+            }
+            push_unique_suggestion_title(
+                &mut popular_titles,
+                title.to_string(),
+                SOURCE_SEARCH_SUGGESTION_LIMIT,
+            );
+        }
+    }
+
+    let mut groups = Vec::new();
+    if !recent_titles.is_empty() {
+        groups.push(SourceSearchSuggestionGroup {
+            label: "Recent",
+            titles: recent_titles,
+        });
+    }
+    if !popular_titles.is_empty() {
+        groups.push(SourceSearchSuggestionGroup {
+            label: "Popular",
+            titles: popular_titles,
+        });
+    }
+
+    groups
+}
+
 fn built_in_allanime_provider() -> SourceProvider {
     SourceProvider {
         id: ALLANIME_PROVIDER_ID.to_string(),
@@ -14107,6 +14487,17 @@ fn split_source_media_title(title: &str) -> (Option<String>, Option<String>) {
 
 fn source_episode_number_from_text(text: &str) -> Option<String> {
     let lowercase_text = text.to_ascii_lowercase();
+    if let Some(episode_marker) = parse_source_season_episode_marker(&lowercase_text) {
+        return Some(
+            episode_marker
+                .season_number
+                .map(|season_number| {
+                    format!("S{season_number:02}E{:02}", episode_marker.episode_number)
+                })
+                .unwrap_or_else(|| episode_marker.episode_number.to_string()),
+        );
+    }
+
     let episode_index = lowercase_text.find("episode")?;
     let number_start = skip_ascii_separators(&lowercase_text, episode_index + "episode".len());
     let bytes = lowercase_text.as_bytes();
@@ -14119,6 +14510,22 @@ fn source_episode_number_from_text(text: &str) -> Option<String> {
     }
 
     (number_end > number_start).then(|| lowercase_text[number_start..number_end].to_string())
+}
+
+fn source_episode_order_number(title: &str) -> Option<f64> {
+    let lowercase_title = title.to_ascii_lowercase();
+    if let Some(episode_marker) = parse_source_season_episode_marker(&lowercase_title) {
+        let season_number = episode_marker.season_number.unwrap_or(0) as f64;
+        return Some((season_number * 10_000.0) + episode_marker.episode_number as f64);
+    }
+
+    extract_episode_number(title)
+}
+
+fn parse_source_season_episode_marker(text: &str) -> Option<EpisodeMarker> {
+    parse_season_episode_marker(text)
+        .or_else(|| parse_season_word_episode_marker(text))
+        .or_else(|| parse_short_season_dash_episode_marker(text))
 }
 
 fn source_media_series_subtitle(
@@ -14152,7 +14559,7 @@ fn compare_source_media_entries(
 }
 
 fn continue_watching_library_items(library: &PlayerLibrary) -> Vec<LibraryGridItem> {
-    library
+    let mut items: Vec<(u128, LibraryGridItem)> = library
         .media_history
         .iter()
         .filter(|entry| {
@@ -14160,17 +14567,55 @@ fn continue_watching_library_items(library: &PlayerLibrary) -> Vec<LibraryGridIt
                 && entry.playback_position_seconds >= MINIMUM_RESUME_POSITION_SECONDS
                 && entry.path.is_file()
         })
-        .take(MAX_LIBRARY_ITEMS_PER_SHELF)
-        .map(|history_entry| {
-            let mut item = library_item_for_media_path(&history_entry.path, false);
+        .map(|entry| {
+            let mut item = library_item_for_media_path(&entry.path, false);
             item.subtitle = Some(format!(
                 "{} watched",
-                format_timestamp(history_entry.playback_position_seconds)
+                format_timestamp(entry.playback_position_seconds)
             ));
-            item.resume_history_entry = Some(history_entry.clone());
+            item.resume_history_entry = Some(entry.clone());
             item.can_remove_from_continue_watching = true;
-            item
+            (entry.updated_at_millis, item)
         })
+        .collect();
+
+    let internet_items: Vec<(u128, LibraryGridItem)> = library
+        .internet_media_history
+        .iter()
+        .filter(|entry| {
+            !entry.is_completed
+                && entry.playback_position_seconds >= MINIMUM_RESUME_POSITION_SECONDS
+        })
+        .map(|entry| {
+            let identity = source_media_identity(&entry.media);
+            let mut item = source_media_library_item(&entry.media, &identity);
+            item.subtitle = Some(format!(
+                "{} watched",
+                format_timestamp(entry.playback_position_seconds)
+            ));
+            let synthetic_entry = MediaHistoryEntry {
+                path: internet_media_library_path(&entry.media),
+                playback_position_seconds: entry.playback_position_seconds,
+                duration_seconds: entry.duration_seconds,
+                is_completed: entry.is_completed,
+                updated_at_millis: entry.updated_at_millis,
+                selected_audio_track_id: None,
+                selected_embedded_subtitle_track_id: None,
+                selected_subtitle_path: None,
+            };
+            item.resume_history_entry = Some(synthetic_entry);
+            item.can_remove_from_continue_watching = true;
+            (entry.updated_at_millis, item)
+        })
+        .collect();
+
+    items.extend(internet_items);
+    items.sort_by(|a, b| b.0.cmp(&a.0));
+
+    items
+        .into_iter()
+        .map(|(_, item)| item)
+        .take(MAX_LIBRARY_ITEMS_PER_SHELF)
         .collect()
 }
 
