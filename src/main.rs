@@ -109,7 +109,6 @@ const MAIN_MENU_WIDTH: f32 = 320.0;
 const CONTEXT_MENU_WIDTH: f32 = 300.0;
 const LIBRARY_CONTEXT_MENU_WIDTH: f32 = 220.0;
 const LIBRARY_CONTEXT_MENU_ESTIMATED_HEIGHT: f32 = 48.0;
-const SETTINGS_MODAL_WIDTH: f32 = 480.0;
 const SOURCE_SEARCH_BAR_WIDTH: f32 = 760.0;
 const SOURCE_SEARCH_RESULT_MAX_HEIGHT: f32 = 340.0;
 const SOURCE_PROVIDER_SETTINGS_MAX_HEIGHT: f32 = 132.0;
@@ -1013,6 +1012,35 @@ enum ContextMenuSection {
     Queue,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum SettingsTab {
+    General,
+    Audio,
+    Subtitles,
+    Providers,
+}
+
+impl SettingsTab {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::General => "General",
+            Self::Audio => "Audio & Capture",
+            Self::Subtitles => "Subtitles",
+            Self::Providers => "Source Providers",
+        }
+    }
+
+    fn icon(&self) -> &'static str {
+        match self {
+            Self::General => ICON_SETTINGS,
+            Self::Audio => ICON_VOLUME,
+            Self::Subtitles => ICON_EYE,
+            Self::Providers => ICON_GLOBE,
+        }
+    }
+}
+
+#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SettingsSelectorKind {
     AudioOutput,
@@ -1132,6 +1160,7 @@ struct WatchPlayer {
     is_audio_output_scan_pending: bool,
     show_unwatched_only: bool,
     open_settings_selector: Option<SettingsSelectorKind>,
+    active_settings_tab: SettingsTab,
     subtitle_menu_anchor: Option<Point<Pixels>>,
     library_context_menu_anchor: Option<Point<Pixels>>,
     library_context_menu_media_path: Option<PathBuf>,
@@ -1205,6 +1234,10 @@ impl WatchPlayer {
                 "Open a real media file or folder to populate the player.".to_string()
             });
         let source_search_input = cx.new(|cx| InlineTextInput::new("Search providers", cx));
+        cx.observe(&source_search_input, |_player, _input, cx| {
+            cx.notify();
+        })
+        .detach();
         let source_provider_input = cx.new(|cx| {
             InlineTextInput::new(
                 "Name | search URL {query} | episodes URL {id} | streams URL {episode_id}",
@@ -1248,6 +1281,7 @@ impl WatchPlayer {
             is_audio_output_scan_pending: false,
             show_unwatched_only: false,
             open_settings_selector: None,
+            active_settings_tab: SettingsTab::General,
             subtitle_menu_anchor: None,
             library_context_menu_anchor: None,
             library_context_menu_media_path: None,
@@ -2763,6 +2797,136 @@ impl WatchPlayer {
                 }
             }
         }
+    }
+
+    fn select_suggestion(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.source_search_input.update(cx, |input, cx| {
+            input.set_text(text, cx);
+        });
+        self.search_source_providers(window, cx);
+    }
+
+    fn render_type_ahead_suggestions(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let current_input = self.source_search_input.read(cx).text().trim().to_string();
+        let current_input_lower = current_input.to_lowercase();
+
+        const POPULAR_TITLES: &[&str] = &[
+            "One Piece",
+            "Naruto Shippuden",
+            "Attack on Titan",
+            "Demon Slayer: Kimetsu no Yaiba",
+            "Jujutsu Kaisen",
+            "My Hero Academia",
+            "Death Note",
+            "Fullmetal Alchemist: Brotherhood",
+            "Bleach: Thousand-Year Blood War",
+            "Hunter x Hunter",
+            "Steins;Gate",
+            "Chainsaw Man",
+            "Spy x Family",
+            "Solo Leveling",
+            "Frieren: Beyond Journey's End",
+            "Kaguya-sama: Love is War",
+            "Your Name",
+            "Spirited Away",
+            "Cowboy Bebop",
+            "Neon Genesis Evangelion",
+            "Cyberpunk: Edgerunners",
+            "Monster",
+            "Code Geass: Lelouch of the Rebellion",
+            "Mob Psycho 100",
+            "Vinland Saga",
+        ];
+
+        // Filter titles
+        let matched_titles: Vec<&str> = if current_input.is_empty() {
+            POPULAR_TITLES.iter().take(8).cloned().collect()
+        } else {
+            POPULAR_TITLES
+                .iter()
+                .filter(|&&title| {
+                    let title_lower = title.to_lowercase();
+                    if title_lower.contains(&current_input_lower) {
+                        return true;
+                    }
+                    let words: Vec<&str> = current_input_lower.split_whitespace().collect();
+                    if !words.is_empty() && words.iter().all(|&word| title_lower.contains(word)) {
+                        return true;
+                    }
+                    false
+                })
+                .take(10)
+                .cloned()
+                .collect()
+        };
+
+        div()
+            .id("type-ahead-suggestions")
+            .flex()
+            .flex_col()
+            .gap_4()
+            .p_1()
+            .child(
+                // Titles Section
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(MUTED_TEXT))
+                            .child("Popular Suggestions")
+                    )
+                    .child(
+                        if matched_titles.is_empty() {
+                            div().text_xs().text_color(rgb(MUTED_TEXT)).child("No matching popular titles.")
+                        } else {
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .children(matched_titles.into_iter().map(|title| {
+                                    div()
+                                        .id(format!("suggest-{title}"))
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .px_2()
+                                        .py_2()
+                                        .rounded_sm()
+                                        .hover(|style| {
+                                            style.bg(rgb(0x121212))
+                                        })
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(move |player, _, window, cx| {
+                                            player.select_suggestion(title, window, cx);
+                                            cx.stop_propagation();
+                                        }))
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap_2()
+                                                .child(
+                                                    svg()
+                                                        .external_path(crate::icon_path(ICON_SEARCH))
+                                                        .w(px(14.0))
+                                                        .h(px(14.0))
+                                                        .text_color(rgb(MUTED_TEXT)),
+                                                )
+                                                .child(title.to_string()),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(rgb(MUTED_TEXT))
+                                                .child("Suggest")
+                                        )
+                                }))
+                        }
+                    )
+            )
     }
 
     fn search_source_providers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -4412,6 +4576,7 @@ impl WatchPlayer {
         cx.notify();
     }
 
+    #[allow(dead_code)]
     fn open_settings_selector(
         &mut self,
         selector_kind: SettingsSelectorKind,
@@ -7341,7 +7506,15 @@ impl WatchPlayer {
     fn render_source_browser_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
         match self.source_browser_view {
             SourceBrowserView::SearchResults => {
-                self.render_source_search_results(cx).into_any_element()
+                let current_input = self.source_search_input.read(cx).text().trim().to_string();
+                let show_suggestions = current_input != self.last_source_search_query
+                    || self.last_source_search_query.is_empty();
+
+                if show_suggestions {
+                    self.render_type_ahead_suggestions(cx).into_any_element()
+                } else {
+                    self.render_source_search_results(cx).into_any_element()
+                }
             }
             SourceBrowserView::Episodes => {
                 self.render_source_episode_results(cx).into_any_element()
@@ -7766,6 +7939,598 @@ impl WatchPlayer {
             )
     }
 
+    fn render_settings_sidebar(&self, cx: &mut Context<Self>) -> Div {
+        let tabs = [
+            SettingsTab::General,
+            SettingsTab::Audio,
+            SettingsTab::Subtitles,
+            SettingsTab::Providers,
+        ];
+
+        div()
+            .w(px(180.0))
+            .h_full()
+            .bg(rgb(PLAYER_BLACK))
+            .p_2()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .children(
+                tabs.into_iter().map(|tab| {
+                    let is_active = self.active_settings_tab == tab;
+                    div()
+                        .id(format!("settings-tab-{}", tab.label()))
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .px_3()
+                        .py_2()
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .bg(if is_active {
+                            rgb_alpha(VLC_ORANGE, 0.08)
+                        } else {
+                            rgb_alpha(OLED_BLACK, 0.0)
+                        })
+                        .hover(|style| {
+                            if !is_active {
+                                style.bg(rgb(0x121212))
+                            } else {
+                                style
+                            }
+                        })
+                        .on_click(cx.listener(move |player, _, _window, cx| {
+                            player.active_settings_tab = tab;
+                            cx.notify();
+                        }))
+                        .child(
+                            svg()
+                                .external_path(crate::icon_path(tab.icon()))
+                                .w(px(16.0))
+                                .h(px(16.0))
+                                .text_color(if is_active { rgb(VLC_ORANGE) } else { rgb(SOFT_WHITE) })
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(if is_active { rgb(VLC_ORANGE) } else { rgb(SOFT_WHITE) })
+                                .child(tab.label())
+                        )
+                })
+            )
+    }
+
+    fn render_settings_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("settings-content-pane")
+            .flex_1()
+            .h_full()
+            .p_4()
+            .overflow_y_scroll()
+            .scrollbar_width(px(4.0))
+            .flex()
+            .flex_col()
+            .gap_4()
+            .when(self.active_settings_tab == SettingsTab::General, |pane| {
+                pane.child(self.render_general_tab_content(cx))
+            })
+            .when(self.active_settings_tab == SettingsTab::Audio, |pane| {
+                pane.child(self.render_audio_tab_content(cx))
+            })
+            .when(self.active_settings_tab == SettingsTab::Subtitles, |pane| {
+                pane.child(self.render_subtitles_tab_content(cx))
+            })
+            .when(self.active_settings_tab == SettingsTab::Providers, |pane| {
+                pane.child(self.render_source_provider_settings_section(cx))
+            })
+    }
+
+    fn render_settings_toggle(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        description: &'static str,
+        value: bool,
+        cx: &mut Context<Self>,
+        on_toggle: impl Fn(&mut WatchPlayer, &mut Window, &mut Context<WatchPlayer>) + 'static,
+    ) -> impl IntoElement {
+        div()
+            .id(id)
+            .flex()
+            .items_center()
+            .justify_between()
+            .px_3()
+            .py_2()
+            .rounded_sm()
+            .hover(|style| style.bg(rgb(0x121212)))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .gap_0p5()
+                    .child(div().text_sm().child(label))
+                    .child(div().text_xs().text_color(rgb(MUTED_TEXT)).child(description))
+            )
+            .child(
+                div()
+                    .id(format!("{}-switch", id))
+                    .w(px(36.0))
+                    .h(px(20.0))
+                    .rounded_full()
+                    .p_0p5()
+                    .cursor_pointer()
+                    .bg(if value { rgb(VLC_ORANGE) } else { rgb(0x282828) })
+                    .on_click(cx.listener(move |player, _event, window, cx| {
+                        on_toggle(player, window, cx);
+                    }))
+                    .child(
+                        div()
+                            .w(px(14.0))
+                            .h(px(14.0))
+                            .rounded_full()
+                            .bg(rgb(SOFT_WHITE))
+                            .when(value, |thumb| thumb.ml(px(16.0)))
+                    )
+            )
+    }
+
+    fn render_settings_segments<T: Clone + PartialEq + 'static>(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        description: &'static str,
+        options: Vec<(String, T)>,
+        current_value: T,
+        cx: &mut Context<Self>,
+        on_change: impl Fn(&mut WatchPlayer, T, &mut Window, &mut Context<WatchPlayer>) + 'static,
+    ) -> impl IntoElement {
+        let on_change = Arc::new(on_change);
+        div()
+            .id(id)
+            .flex()
+            .flex_col()
+            .gap_1p5()
+            .px_3()
+            .py_2()
+            .rounded_sm()
+            .hover(|style| style.bg(rgb(0x121212)))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .child(div().text_sm().child(label))
+                    .child(div().text_xs().text_color(rgb(MUTED_TEXT)).child(description))
+            )
+            .child(
+                div()
+                    .flex()
+                    .bg(rgb(PLAYER_BLACK))
+                    .p_0p5()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(rgb(FINE_BORDER))
+                    .children(
+                        options.into_iter().enumerate().map(|(idx, (option_label, option_val))| {
+                            let is_selected = option_val == current_value;
+                            let on_change = Arc::clone(&on_change);
+                            let option_val_clone = option_val.clone();
+                            div()
+                                .id(format!("{}-opt-{}", id, idx))
+                                .flex_1()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .cursor_pointer()
+                                .bg(if is_selected {
+                                    rgb_alpha(VLC_ORANGE, 0.12)
+                                } else {
+                                    rgb_alpha(OLED_BLACK, 0.0)
+                                })
+                                .hover(|style| {
+                                    if !is_selected {
+                                        style.bg(rgb(0x1a1a1a))
+                                    } else {
+                                        style
+                                    }
+                                })
+                                .on_click(cx.listener(move |player, _event, window, cx| {
+                                    on_change(player, option_val_clone.clone(), window, cx);
+                                }))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(if is_selected {
+                                            rgb(VLC_ORANGE)
+                                        } else {
+                                            rgb(SOFT_WHITE)
+                                        })
+                                        .child(option_label)
+                                )
+                        })
+                    )
+            )
+    }
+
+    fn render_subtitle_color_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = vec![
+            ("#FFFFFF", "White", 0xffffff),
+            ("#FFD27A", "Yellow", 0xffd27a),
+            ("#80D8FF", "Blue", 0x80d8ff),
+            ("#B6FFB0", "Green", 0xb6ffb0),
+        ];
+        let current_color = self.settings.subtitle_color.clone();
+
+        div()
+            .id("subtitle-color-selector")
+            .flex()
+            .items_center()
+            .justify_between()
+            .px_3()
+            .py_2()
+            .rounded_sm()
+            .hover(|style| style.bg(rgb(0x121212)))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .gap_0p5()
+                    .child(div().text_sm().child("Subtitle Color"))
+                    .child(div().text_xs().text_color(rgb(MUTED_TEXT)).child("Foreground color of the subtitles."))
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .children(
+                        colors.into_iter().map(|(hex, name, rgb_val)| {
+                            let is_selected = current_color == hex;
+                            div()
+                                .id(format!("color-{}", name))
+                                .w(px(22.0))
+                                .h(px(22.0))
+                                .rounded_full()
+                                .border_2()
+                                .border_color(if is_selected { rgb(VLC_ORANGE) } else { rgb_alpha(OLED_BLACK, 0.0) })
+                                .cursor_pointer()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .hover(|style| style.border_color(rgb(VLC_ORANGE)))
+                                .on_click(cx.listener(move |player, _event, window, cx| {
+                                    player.settings.subtitle_color = hex.to_string();
+                                    save_player_settings(&player.settings);
+                                    player.apply_subtitle_style_in_backend();
+                                    player.show_osd(format!("Subtitle color {name}"), window, cx);
+                                    cx.notify();
+                                }))
+                                .child(
+                                    div()
+                                        .w(px(14.0))
+                                        .h(px(14.0))
+                                        .rounded_full()
+                                        .bg(rgb(rgb_val))
+                                )
+                        })
+                    )
+            )
+    }
+
+    fn render_default_volume_row_new(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("settings-default-volume-row")
+            .flex()
+            .items_center()
+            .justify_between()
+            .px_3()
+            .py_2()
+            .rounded_sm()
+            .hover(|style| style.bg(rgb(0x121212)))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .gap_0p5()
+                    .child(div().text_sm().child("Default Volume"))
+                    .child(div().text_xs().text_color(rgb(MUTED_TEXT)).child("Initial volume level for newly loaded media files."))
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(default_volume_slider(
+                        self.settings.default_volume_percent,
+                        cx,
+                    ))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(MUTED_TEXT))
+                            .w(px(36.0))
+                            .text_right()
+                            .child(format!("{}%", self.settings.default_volume_percent)),
+                    )
+            )
+    }
+
+    fn render_general_tab_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let resume_options = vec![
+            ("Ask".to_string(), ResumeBehavior::Ask),
+            ("Always".to_string(), ResumeBehavior::Always),
+            ("Never".to_string(), ResumeBehavior::Never),
+        ];
+        let seek_options = vec![
+            ("3s".to_string(), 3.0),
+            ("5s".to_string(), 5.0),
+            ("10s".to_string(), 10.0),
+            ("30s".to_string(), 30.0),
+        ];
+        let volume_options = vec![
+            ("1%".to_string(), 1),
+            ("2%".to_string(), 2),
+            ("5%".to_string(), 5),
+            ("10%".to_string(), 10),
+        ];
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(self.render_settings_toggle(
+                "toggle-start-fullscreen",
+                "Start Fullscreen",
+                "Start playback in fullscreen mode by default.",
+                self.settings.start_fullscreen,
+                cx,
+                |player, window, cx| {
+                    player.set_start_fullscreen_setting(!player.settings.start_fullscreen, window, cx);
+                }
+            ))
+            .child(self.render_settings_toggle(
+                "toggle-backdrop-blur",
+                "Backdrop Blur",
+                "Enable blurred glass visual effects behind windows.",
+                self.settings.is_backdrop_blur_enabled,
+                cx,
+                |player, window, cx| {
+                    player.set_backdrop_blur_setting(!player.settings.is_backdrop_blur_enabled, window, cx);
+                }
+            ))
+            .child(self.render_settings_segments(
+                "segments-resume",
+                "Resume Playback",
+                "Control how playback position is restored when reopening media.",
+                resume_options,
+                self.settings.resume_behavior,
+                cx,
+                |player, val, window, cx| {
+                    player.set_resume_behavior_setting(val, window, cx);
+                }
+            ))
+            .child(self.render_settings_segments(
+                "segments-seek-step",
+                "Seek Step",
+                "Interval when seeking forward or backward with arrow keys.",
+                seek_options,
+                self.settings.seek_step_seconds,
+                cx,
+                |player, val, window, cx| {
+                    player.settings.seek_step_seconds = val;
+                    player.save_settings_and_show(format!("Seek step {} seconds", val), window, cx);
+                }
+            ))
+            .child(self.render_settings_segments(
+                "segments-volume-step",
+                "Volume Step",
+                "Percentage change when adjusting volume with mouse scroll.",
+                volume_options,
+                self.settings.volume_step_percent,
+                cx,
+                |player, val, window, cx| {
+                    player.settings.volume_step_percent = val;
+                    player.save_settings_and_show(format!("Volume step {}%", val), window, cx);
+                }
+            ))
+    }
+
+    fn render_audio_tab_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let lang_options = vec![
+            ("English".to_string(), "eng".to_string()),
+            ("Japanese".to_string(), "jpn".to_string()),
+            ("Spanish".to_string(), "spa".to_string()),
+            ("French".to_string(), "fra".to_string()),
+            ("Any".to_string(), "any".to_string()),
+        ];
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(self.render_default_volume_row_new(cx))
+            .child(self.render_settings_toggle(
+                "toggle-live-lowest-latency",
+                "Live Lowest Latency",
+                "Reduce audio and capture delay for live capture feeds.",
+                self.settings.is_lowest_latency_live_capture_enabled,
+                cx,
+                |player, window, cx| {
+                    player.set_lowest_latency_live_capture_setting(!player.settings.is_lowest_latency_live_capture_enabled, window, cx);
+                }
+            ))
+            .child(self.render_settings_toggle(
+                "toggle-live-exclusive-audio",
+                "Exclusive Audio Capture",
+                "Bypass the system mixer to stream audio directly.",
+                self.settings.is_live_capture_exclusive_audio_enabled,
+                cx,
+                |player, window, cx| {
+                    player.set_live_capture_exclusive_audio_setting(!player.settings.is_live_capture_exclusive_audio_enabled, window, cx);
+                }
+            ))
+            .child(self.render_settings_segments(
+                "segments-audio-lang",
+                "Preferred Audio Language",
+                "Default language for multi-language media audio tracks.",
+                lang_options,
+                self.settings.preferred_audio_language.clone(),
+                cx,
+                |player, val, window, cx| {
+                    player.set_preferred_audio_language_setting(val, window, cx);
+                }
+            ))
+            .child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(div().text_sm().child("Audio Output Device"))
+                    .child(div().text_xs().text_color(rgb(MUTED_TEXT)).child("Select default device for audio playback."))
+                    .child(self.render_audio_device_inline_list(cx))
+            )
+    }
+
+    fn render_audio_device_inline_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let current_device_id = &self.settings.audio_output_device;
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .p_1()
+            .bg(rgb(PLAYER_BLACK))
+            .rounded_sm()
+            .border_1()
+            .border_color(rgb(FINE_BORDER))
+            .children(
+                self.audio_output_devices.iter().map(|device| {
+                    let is_selected = device.device_id == *current_device_id;
+                    div()
+                        .id(format!("audio-device-{}", library_safe_element_key(&device.device_id)))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .bg(if is_selected {
+                            rgb_alpha(VLC_ORANGE, 0.12)
+                        } else {
+                            rgb_alpha(OLED_BLACK, 0.0)
+                        })
+                        .hover(|style| {
+                            if !is_selected {
+                                style.bg(rgb(0x1a1a1a))
+                            } else {
+                                style
+                            }
+                        })
+                        .on_click(cx.listener({
+                            let device_id = device.device_id.clone();
+                            move |player, _event, window, cx| {
+                                player.set_audio_output_device(device_id.clone(), window, cx);
+                            }
+                        }))
+                        .child(div().text_xs().text_color(if is_selected { rgb(VLC_ORANGE) } else { rgb(SOFT_WHITE) }).child(device.label.clone()))
+                        .when(is_selected, |row| {
+                            row.child(div().text_xs().text_color(rgb(VLC_ORANGE)).child("Selected"))
+                        })
+                })
+            )
+    }
+
+    fn render_subtitles_tab_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let hw_options = vec![
+            ("Auto Safe".to_string(), "auto-safe".to_string()),
+            ("D3D11VA".to_string(), "d3d11va".to_string()),
+            ("Off".to_string(), "no".to_string()),
+        ];
+        let font_size_options = vec![
+            ("42px".to_string(), 42),
+            ("48px".to_string(), 48),
+            ("60px".to_string(), 60),
+            ("72px".to_string(), 72),
+        ];
+        let position_options = vec![
+            ("85%".to_string(), 85),
+            ("90%".to_string(), 90),
+            ("95%".to_string(), 95),
+            ("100%".to_string(), 100),
+        ];
+        let sub_lang_options = vec![
+            ("English".to_string(), "eng".to_string()),
+            ("Japanese".to_string(), "jpn".to_string()),
+            ("Spanish".to_string(), "spa".to_string()),
+            ("French".to_string(), "fra".to_string()),
+            ("Any".to_string(), "any".to_string()),
+        ];
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(self.render_settings_segments(
+                "segments-hw-decode",
+                "Hardware Decode Mode",
+                "Choose API priority for decoding video streams on your GPU.",
+                hw_options,
+                self.settings.hardware_decoding_mode.clone(),
+                cx,
+                |player, val, window, cx| {
+                    player.set_hardware_decoding_setting(val, window, cx);
+                }
+            ))
+            .child(self.render_settings_segments(
+                "segments-subtitle-font-size",
+                "Subtitle Font Size",
+                "Adjust text size of subtitles rendered over the video stream.",
+                font_size_options,
+                self.settings.subtitle_font_size,
+                cx,
+                |player, val, window, cx| {
+                    player.settings.subtitle_font_size = val;
+                    save_player_settings(&player.settings);
+                    player.apply_subtitle_style_in_backend();
+                    player.show_osd(format!("Subtitle size {}", val), window, cx);
+                }
+            ))
+            .child(self.render_subtitle_color_selector(cx))
+            .child(self.render_settings_segments(
+                "segments-subtitle-position",
+                "Subtitle Position",
+                "Set subtitle vertical coordinate alignment percent.",
+                position_options,
+                self.settings.subtitle_position_percent,
+                cx,
+                |player, val, window, cx| {
+                    player.settings.subtitle_position_percent = val;
+                    save_player_settings(&player.settings);
+                    player.apply_subtitle_style_in_backend();
+                    player.show_osd(format!("Subtitle position {}%", val), window, cx);
+                }
+            ))
+            .child(self.render_settings_segments(
+                "segments-sub-lang",
+                "Preferred Subtitle Language",
+                "Select subtitle language code when media is loaded.",
+                sub_lang_options,
+                self.settings.preferred_subtitle_language.clone(),
+                cx,
+                |player, val, window, cx| {
+                    player.set_preferred_subtitle_language_setting(val, window, cx);
+                }
+            ))
+    }
+
     fn render_settings_modal(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .id("settings-modal-backdrop")
@@ -7791,19 +8556,17 @@ impl WatchPlayer {
             .child(
                 div()
                     .id("settings-modal")
-                    .w(px(SETTINGS_MODAL_WIDTH))
-                    .p_4()
+                    .w(px(700.0))
+                    .h(px(460.0))
                     .bg(self
                         .settings
                         .surface_background_color(MENU_BLACK, BACKDROP_BLUR_MODAL_BACKGROUND_ALPHA))
-                    .rounded_sm()
+                    .rounded_md()
                     .border_1()
                     .border_color(rgb(BRIGHT_BORDER))
                     .shadow_lg()
                     .flex()
                     .flex_col()
-                    .gap_4()
-                    .text_color(rgb(SOFT_WHITE))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|_player, _event, _window, cx| {
@@ -7814,7 +8577,10 @@ impl WatchPlayer {
                         div()
                             .flex()
                             .items_center()
-                            .gap_2()
+                            .px_4()
+                            .py_3()
+                            .border_b_1()
+                            .border_color(rgb(FINE_BORDER))
                             .child(div().text_lg().flex_1().child("Settings"))
                             .child(context_icon_button(
                                 "settings-close",
@@ -7826,7 +8592,20 @@ impl WatchPlayer {
                                 },
                             )),
                     )
-                    .child(self.render_settings_menu_section(cx)),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_1()
+                            .overflow_hidden()
+                            .child(self.render_settings_sidebar(cx))
+                            .child(
+                                div()
+                                    .w(px(1.0))
+                                    .h_full()
+                                    .bg(rgb(FINE_BORDER))
+                            )
+                            .child(self.render_settings_content(cx))
+                    )
             )
             .when_some(self.open_settings_selector, |backdrop, selector_kind| {
                 backdrop.child(self.render_settings_selector_overlay(selector_kind, cx))
@@ -7974,108 +8753,6 @@ impl WatchPlayer {
             ))
     }
 
-    fn render_settings_menu_section(&self, cx: &mut Context<Self>) -> Div {
-        div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .child(self.render_default_volume_setting_row(cx))
-            .child(self.render_settings_action_row(
-                "Audio Output",
-                self.audio_output_device_label(&self.settings.audio_output_device),
-                cx,
-                |player, _window, cx| {
-                    player.open_settings_selector(SettingsSelectorKind::AudioOutput, cx);
-                },
-            ))
-            .child(self.render_settings_action_row(
-                "Resume",
-                self.settings.resume_behavior.label().to_string(),
-                cx,
-                |player, _window, cx| {
-                    player.open_settings_selector(SettingsSelectorKind::ResumeBehavior, cx);
-                },
-            ))
-            .child(self.render_settings_action_row(
-                "Seek Step",
-                format!("{}s", self.settings.seek_step_seconds),
-                cx,
-                |player, _window, cx| {
-                    player.open_settings_selector(SettingsSelectorKind::SeekStep, cx);
-                },
-            ))
-            .child(self.render_settings_action_row(
-                "Volume Step",
-                format!("{}%", self.settings.volume_step_percent),
-                cx,
-                |player, _window, cx| {
-                    player.open_settings_selector(SettingsSelectorKind::VolumeStep, cx);
-                },
-            ))
-            .child(self.render_settings_action_row(
-                "Audio Language",
-                self.settings.preferred_audio_language.clone(),
-                cx,
-                |player, _window, cx| {
-                    player.open_settings_selector(SettingsSelectorKind::PreferredAudioLanguage, cx);
-                },
-            ))
-            .child(self.render_settings_action_row(
-                "Subtitle Language",
-                self.settings.preferred_subtitle_language.clone(),
-                cx,
-                |player, _window, cx| {
-                    player.open_settings_selector(
-                        SettingsSelectorKind::PreferredSubtitleLanguage,
-                        cx,
-                    );
-                },
-            ))
-            .child(self.render_settings_action_row(
-                "Hardware Decode",
-                self.settings.hardware_decoding_mode.clone(),
-                cx,
-                |player, _window, cx| {
-                    player.open_settings_selector(SettingsSelectorKind::HardwareDecoding, cx);
-                },
-            ))
-            .child(self.render_settings_action_row(
-                "Start Fullscreen",
-                on_off_label(self.settings.start_fullscreen).to_string(),
-                cx,
-                |player, _window, cx| {
-                    player.open_settings_selector(SettingsSelectorKind::StartFullscreen, cx);
-                },
-            ))
-            .child(self.render_settings_action_row(
-                "Live Lowest Latency",
-                on_off_label(self.settings.is_lowest_latency_live_capture_enabled).to_string(),
-                cx,
-                |player, _window, cx| {
-                    player.open_settings_selector(SettingsSelectorKind::LiveLowestLatency, cx);
-                },
-            ))
-            .child(self.render_settings_action_row(
-                "Exclusive Audio",
-                on_off_label(self.settings.is_live_capture_exclusive_audio_enabled).to_string(),
-                cx,
-                |player, _window, cx| {
-                    player.open_settings_selector(
-                        SettingsSelectorKind::LiveCaptureExclusiveAudio,
-                        cx,
-                    );
-                },
-            ))
-            .child(self.render_settings_action_row(
-                "Backdrop Blur",
-                on_off_label(self.settings.is_backdrop_blur_enabled).to_string(),
-                cx,
-                |player, _window, cx| {
-                    player.open_settings_selector(SettingsSelectorKind::BackdropBlur, cx);
-                },
-            ))
-            .child(self.render_source_provider_settings_section(cx))
-    }
 
     fn render_source_provider_settings_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let provider_count = self.settings.source_providers.len();
@@ -8428,28 +9105,6 @@ impl WatchPlayer {
             .collect()
     }
 
-    fn render_default_volume_setting_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .id("settings-default-volume")
-            .flex()
-            .items_center()
-            .gap_3()
-            .px_2()
-            .py_1()
-            .child(div().text_sm().w(px(122.0)).child("Default Volume"))
-            .child(default_volume_slider(
-                self.settings.default_volume_percent,
-                cx,
-            ))
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(MUTED_TEXT))
-                    .w(px(36.0))
-                    .text_right()
-                    .child(format!("{}%", self.settings.default_volume_percent)),
-            )
-    }
 
     fn render_settings_action_row(
         &self,
@@ -8768,6 +9423,14 @@ impl InlineTextInput {
 
     fn text(&self) -> String {
         self.content.clone()
+    }
+
+    fn set_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.content = text.to_string();
+        self.selected_range = self.content.len()..self.content.len();
+        self.selection_reversed = false;
+        self.marked_range = None;
+        cx.notify();
     }
 
     fn clear(&mut self, cx: &mut Context<Self>) {
