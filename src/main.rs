@@ -61,7 +61,7 @@ const BACKDROP_BLUR_VIDEO_SURFACE_ALPHA: f32 = 0.88;
 const BACKDROP_BLUR_LIBRARY_BACKGROUND_ALPHA: f32 = 0.78;
 const BACKDROP_BLUR_MENU_BACKGROUND_ALPHA: f32 = 0.82;
 const BACKDROP_BLUR_MODAL_BACKDROP_ALPHA: f32 = 0.54;
-const BACKDROP_BLUR_MODAL_BACKGROUND_ALPHA: f32 = 0.86;
+const BACKDROP_BLUR_MODAL_BACKGROUND_ALPHA: f32 = 0.70;
 const BACKDROP_BLUR_FLOATING_CONTROL_ALPHA: f32 = 0.70;
 const CONTINUE_REMOVE_HOVER_SCALE: f32 = 1.36;
 const CONTINUE_REMOVE_SCALE_ANIMATION_MS: u64 = 140;
@@ -166,6 +166,8 @@ const ICON_CHEVRON_UP: &str = "chevron-up.svg";
 const ICON_CHEVRON_DOWN: &str = "chevron-down.svg";
 const ICON_EYE: &str = "eye.svg";
 const ICON_X: &str = "x.svg";
+const ICON_FILE: &str = "file.svg";
+const ICON_FOLDER: &str = "folder.svg";
 
 const VIDEO_EXTENSIONS: [&str; 20] = [
     "mkv", "mp4", "mov", "m4v", "3gp", "avi", "wmv", "asf", "ogm", "ogg", "flv", "webm", "mxf",
@@ -1213,6 +1215,7 @@ struct WatchPlayer {
     playback_process: Option<Child>,
     playback_ipc_path: Option<String>,
     playback_log_path: Option<PathBuf>,
+    last_applied_blur_state: Option<bool>,
 }
 
 impl WatchPlayer {
@@ -1334,6 +1337,7 @@ impl WatchPlayer {
             playback_process: None,
             playback_ipc_path: None,
             playback_log_path: None,
+            last_applied_blur_state: None,
         };
         if !initial_media_paths.is_empty() {
             player.load_media_paths(initial_media_paths, window, cx);
@@ -5134,20 +5138,20 @@ impl WatchPlayer {
                                             player.toggle_unwatched_only(cx);
                                         },
                                     ))
-                                    .child(prompt_action_button(
+                                    .child(prompt_icon_action_button(
                                         "library-open-file",
+                                        ICON_FILE,
                                         "Open File",
-                                        false,
                                         library_scale,
                                         cx,
                                         |player, window, cx| {
                                             player.open_file_picker(window, cx);
                                         },
                                     ))
-                                    .child(prompt_action_button(
+                                    .child(prompt_icon_action_button(
                                         "library-open-folder",
+                                        ICON_FOLDER,
                                         "Open Folder",
-                                        true,
                                         library_scale,
                                         cx,
                                         |player, window, cx| {
@@ -5872,6 +5876,7 @@ impl WatchPlayer {
         cx.notify();
     }
 
+    #[allow(dead_code)]
     fn update_continue_remove_hover(
         &mut self,
         media_path: PathBuf,
@@ -6179,6 +6184,12 @@ impl WatchPlayer {
                 },
             ))
         } else {
+            let is_in_continue_watching = self.library.media_history.iter().any(|entry| {
+                entry.path == media_path
+                    && !entry.is_completed
+                    && entry.playback_position_seconds >= MINIMUM_RESUME_POSITION_SECONDS
+            });
+
             menu.child(simple_menu_action("Mark Watched", cx, {
                 let media_path = media_path.clone();
                 move |player, _window, cx| {
@@ -6205,6 +6216,12 @@ impl WatchPlayer {
                     player.pin_library_folder(folder_path, cx);
                 }
             }))
+            .when(is_in_continue_watching, |menu| {
+                let media_path = media_path.clone();
+                menu.child(simple_menu_action("Remove", cx, move |player, _window, cx| {
+                    player.dismiss_continue_watching_entry(media_path.clone(), cx);
+                }))
+            })
         }
     }
 
@@ -6242,19 +6259,10 @@ impl WatchPlayer {
     ) -> impl IntoElement {
         let item_path = item.path.clone();
         let item_path_for_click = item.path.clone();
-        let item_path_for_remove = item.path.clone();
-        let item_path_for_remove_hover = item.path.clone();
         let item_path_for_context_menu = item.path.clone();
         let resume_history_entry = item.resume_history_entry.clone();
         let internet_media_for_click = item.internet_media.clone();
         let internet_media_for_context_menu = item.internet_media.clone();
-        let can_remove_from_continue_watching = item.can_remove_from_continue_watching;
-        let is_continue_remove_hovered =
-            self.hovered_continue_remove_media_path.as_ref() == Some(&item.path);
-        let is_continue_remove_exiting =
-            self.exiting_continue_remove_media_path.as_ref() == Some(&item.path);
-        let continue_remove_scale_animation_generation =
-            self.continue_remove_scale_animation_generation;
         let is_watched = item.is_watched;
         let is_internet_media = item.is_internet_media;
         let episode_badge = item.episode_badge.clone();
@@ -6473,13 +6481,10 @@ impl WatchPlayer {
                                 )),
                         )
                     })
-                    .when(can_remove_from_continue_watching, |frame| {
+                    .when(is_internet_media, |frame| {
                         frame.child(
                             div()
-                                .id(format!(
-                                    "library-continue-remove-{}",
-                                    item_path_for_remove.display()
-                                ))
+                                .id(format!("library-internet-badge-{}", item_path.display()))
                                 .absolute()
                                 .top(px(8.0 * library_scale))
                                 .right(px(8.0 * library_scale))
@@ -6489,59 +6494,17 @@ impl WatchPlayer {
                                 .items_center()
                                 .justify_center()
                                 .rounded_full()
-                                .text_color(rgb(SOFT_WHITE))
-                                .cursor_pointer()
-                                .on_hover(cx.listener(
-                                    move |player, is_hovered: &bool, _window, cx| {
-                                        player.update_continue_remove_hover(
-                                            item_path_for_remove_hover.clone(),
-                                            *is_hovered,
-                                            cx,
-                                        );
-                                    },
+                                .bg(linear_gradient(
+                                    135.0,
+                                    linear_color_stop(rgb_alpha(OLED_BLACK, 0.62), 0.0),
+                                    linear_color_stop(rgb_alpha(OLED_BLACK, 0.18), 1.0),
                                 ))
-                                .on_click(cx.listener(move |player, _, _window, cx| {
-                                    player.dismiss_continue_watching_entry(
-                                        item_path_for_remove.clone(),
-                                        cx,
-                                    );
-                                    cx.stop_propagation();
-                                }))
-                                .child(render_continue_remove_icon(
-                                    &item_path,
-                                    is_continue_remove_hovered,
-                                    is_continue_remove_exiting,
-                                    continue_remove_scale_animation_generation,
-                                    library_scale,
-                                )),
-                        )
-                    })
-                    .when(is_internet_media, |frame| {
-                        frame.child(
-                            div()
-                                .id(format!("library-internet-badge-{}", item_path.display()))
-                                .absolute()
-                                .top(px(8.0 * library_scale))
-                                .right(px(8.0 * library_scale))
-                                .w(px(30.0 * library_scale))
-                                .h(px(30.0 * library_scale))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .bg(if self.settings.is_backdrop_blur_enabled {
-                                    rgb_alpha(OLED_BLACK, BACKDROP_BLUR_MENU_BACKGROUND_ALPHA)
-                                } else {
-                                    rgb_alpha(OLED_BLACK, 0.88)
-                                })
-                                .border_1()
-                                .border_color(rgb_alpha(SOFT_WHITE, 0.46))
-                                .text_color(rgb(SOFT_WHITE))
                                 .shadow_lg()
                                 .child(
                                     svg()
                                         .external_path(crate::icon_path(ICON_GLOBE))
-                                        .w(px(17.0 * library_scale))
-                                        .h(px(17.0 * library_scale))
+                                        .w(px(14.0 * library_scale))
+                                        .h(px(14.0 * library_scale))
                                         .text_color(rgb(SOFT_WHITE)),
                                 ),
                         )
@@ -6552,16 +6515,18 @@ impl WatchPlayer {
                                 .absolute()
                                 .right(px(8.0 * library_scale))
                                 .bottom(px(8.0 * library_scale))
-                                .px(px(8.0 * library_scale))
-                                .py(px(4.0 * library_scale))
-                                .text_size(px(12.0 * library_scale))
-                                .line_height(px(14.0 * library_scale))
+                                .px(px(6.0 * library_scale))
+                                .py(px(3.0 * library_scale))
+                                .text_size(px(10.0 * library_scale))
+                                .line_height(px(12.0 * library_scale))
                                 .text_color(rgb(SOFT_WHITE))
-                                .bg(if self.settings.is_backdrop_blur_enabled {
-                                    rgb_alpha(OLED_BLACK, BACKDROP_BLUR_FLOATING_CONTROL_ALPHA)
-                                } else {
-                                    rgb_alpha(OLED_BLACK, 0.78)
-                                })
+                                .rounded_sm()
+                                .bg(linear_gradient(
+                                    135.0,
+                                    linear_color_stop(rgb_alpha(OLED_BLACK, 0.62), 0.0),
+                                    linear_color_stop(rgb_alpha(OLED_BLACK, 0.18), 1.0),
+                                ))
+                                .shadow_lg()
                                 .child(episode_badge),
                         )
                     })
@@ -6572,25 +6537,23 @@ impl WatchPlayer {
                                 .absolute()
                                 .top(px(8.0 * library_scale))
                                 .left(px(8.0 * library_scale))
-                                .w(px(30.0 * library_scale))
-                                .h(px(30.0 * library_scale))
+                                .w(px(28.0 * library_scale))
+                                .h(px(28.0 * library_scale))
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .bg(if self.settings.is_backdrop_blur_enabled {
-                                    rgb_alpha(OLED_BLACK, BACKDROP_BLUR_MENU_BACKGROUND_ALPHA)
-                                } else {
-                                    rgb_alpha(OLED_BLACK, 0.88)
-                                })
-                                .border_1()
-                                .border_color(rgb_alpha(SOFT_WHITE, 0.46))
-                                .text_color(rgb(SOFT_WHITE))
+                                .rounded_full()
+                                .bg(linear_gradient(
+                                    135.0,
+                                    linear_color_stop(rgb_alpha(OLED_BLACK, 0.62), 0.0),
+                                    linear_color_stop(rgb_alpha(OLED_BLACK, 0.18), 1.0),
+                                ))
                                 .shadow_lg()
                                 .child(
                                     svg()
                                         .external_path(crate::icon_path(ICON_EYE))
-                                        .w(px(17.0 * library_scale))
-                                        .h(px(17.0 * library_scale))
+                                        .w(px(14.0 * library_scale))
+                                        .h(px(14.0 * library_scale))
                                         .text_color(rgb(SOFT_WHITE)),
                                 ),
                         )
@@ -7950,7 +7913,7 @@ impl WatchPlayer {
         div()
             .w(px(180.0))
             .h_full()
-            .bg(rgb(PLAYER_BLACK))
+            .bg(self.settings.surface_background_color(PLAYER_BLACK, 0.24))
             .p_2()
             .flex()
             .flex_col()
@@ -8106,7 +8069,7 @@ impl WatchPlayer {
             .child(
                 div()
                     .flex()
-                    .bg(rgb(PLAYER_BLACK))
+                    .bg(self.settings.surface_background_color(PLAYER_BLACK, 0.45))
                     .p_0p5()
                     .rounded_sm()
                     .border_1()
@@ -8406,7 +8369,7 @@ impl WatchPlayer {
             .flex_col()
             .gap_1()
             .p_1()
-            .bg(rgb(PLAYER_BLACK))
+            .bg(self.settings.surface_background_color(PLAYER_BLACK, 0.45))
             .rounded_sm()
             .border_1()
             .border_color(rgb(FINE_BORDER))
@@ -10021,6 +9984,28 @@ impl Render for WatchPlayer {
         let viewport_width = viewport_size.width.as_f32();
         let viewport_height = viewport_size.height.as_f32();
         let is_video_surface_active = self.is_video_surface_active();
+
+        let should_blur = (self.is_settings_modal_open
+            || self.is_source_search_open
+            || self.is_main_menu_open
+            || self.is_subtitle_menu_open
+            || self.is_live_capture_menu_open
+            || self.open_settings_selector.is_some()
+            || self.open_context_menu_section.is_some()
+            || self.library_context_menu_media_path.is_some())
+            && self.settings.is_backdrop_blur_enabled;
+
+        if self.last_applied_blur_state != Some(should_blur) {
+            self.last_applied_blur_state = Some(should_blur);
+            if self.is_video_surface_active() {
+                if should_blur {
+                    self.send_mpv_command(json!(["set_property", "vf", "lavfi=[gblur=sigma=12]"]));
+                } else {
+                    self.send_mpv_command(json!(["set_property", "vf", ""]));
+                }
+            }
+        }
+
         let should_show_blurred_library_backdrop =
             self.settings.is_backdrop_blur_enabled && self.is_library_surface_visible();
         let active_key_context = if self.is_source_search_open || self.is_settings_modal_open {
@@ -10183,6 +10168,7 @@ impl Drop for WatchPlayer {
     }
 }
 
+#[allow(dead_code)]
 fn render_continue_remove_icon(
     media_path: &Path,
     is_hovered: bool,
