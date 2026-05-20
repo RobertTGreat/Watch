@@ -398,7 +398,13 @@ impl LoadedMedia {
 
     fn display_detail(&self) -> String {
         match &self.source {
-            LoadedMediaSource::File(path) => path.display().to_string(),
+            LoadedMediaSource::File(path) => {
+                if let Some(parent_name) = path.parent().and_then(|p| p.file_name()).and_then(|os| os.to_str()) {
+                    format!("📁 {}", parent_name)
+                } else {
+                    path.display().to_string()
+                }
+            }
             LoadedMediaSource::LiveCapture(device) => device.detail_label(),
             LoadedMediaSource::Internet(media) => media
                 .subtitle
@@ -1215,7 +1221,6 @@ struct WatchPlayer {
     playback_process: Option<Child>,
     playback_ipc_path: Option<String>,
     playback_log_path: Option<PathBuf>,
-    last_applied_blur_state: Option<bool>,
 }
 
 impl WatchPlayer {
@@ -1337,7 +1342,6 @@ impl WatchPlayer {
             playback_process: None,
             playback_ipc_path: None,
             playback_log_path: None,
-            last_applied_blur_state: None,
         };
         if !initial_media_paths.is_empty() {
             player.load_media_paths(initial_media_paths, window, cx);
@@ -5275,9 +5279,7 @@ impl WatchPlayer {
                     .overflow_y_scroll()
                     .scrollbar_width(px((4.0 * library_scale).clamp(4.0, 10.0)))
                     .p(px(8.0 * library_scale))
-                    .bg(self
-                        .settings
-                        .surface_background_color(MENU_BLACK, BACKDROP_BLUR_MENU_BACKGROUND_ALPHA))
+                    .bg(rgb_alpha(0x0a0a0a, 0.95))
                     .border_1()
                     .border_color(rgb(BRIGHT_BORDER))
                     .rounded_sm()
@@ -6162,9 +6164,7 @@ impl WatchPlayer {
             .top(px(menu_top))
             .w(px(LIBRARY_CONTEXT_MENU_WIDTH))
             .p_2()
-            .bg(self
-                .settings
-                .surface_background_color(MENU_BLACK, BACKDROP_BLUR_MENU_BACKGROUND_ALPHA))
+            .bg(rgb_alpha(0x0a0a0a, 0.95))
             .rounded_sm()
             .border_1()
             .border_color(rgb(BRIGHT_BORDER))
@@ -6818,9 +6818,7 @@ impl WatchPlayer {
             .bottom(px(34.0))
             .w(px(THUMBNAIL_PREVIEW_WIDTH))
             .p_1()
-            .bg(self
-                .settings
-                .surface_background_color(MENU_BLACK, BACKDROP_BLUR_MENU_BACKGROUND_ALPHA))
+            .bg(rgb_alpha(0x0a0a0a, 0.95))
             .border_1()
             .border_color(rgb(BRIGHT_BORDER))
             .shadow_lg()
@@ -6988,9 +6986,7 @@ impl WatchPlayer {
             .right(px(MENU_RIGHT_MARGIN))
             .w(px(MAIN_MENU_WIDTH))
             .p_2()
-            .bg(self
-                .settings
-                .surface_background_color(MENU_BLACK, BACKDROP_BLUR_MENU_BACKGROUND_ALPHA))
+            .bg(rgb_alpha(0x0a0a0a, 0.95))
             .rounded_sm()
             .border_1()
             .border_color(rgb(BRIGHT_BORDER))
@@ -7004,9 +7000,12 @@ impl WatchPlayer {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .gap_2()
-                    .px_2()
-                    .pb_1()
+                    .p_1p5()
+                    .mb_1()
+                    .bg(rgb(PLAYER_BLACK))
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(rgb(FINE_BORDER))
                     .child(
                         div()
                             .flex()
@@ -7046,18 +7045,20 @@ impl WatchPlayer {
                     )
                     .child(self.render_playback_mode_toggles("main-menu", cx)),
             )
-            .child(simple_menu_action("Open File", cx, |player, window, cx| {
+            .child(simple_menu_action_with_icon("Open File", ICON_FILE, cx, |player, window, cx| {
                 player.open_file_picker(window, cx);
             }))
-            .child(simple_menu_action(
+            .child(simple_menu_action_with_icon(
                 "Open Multiple Files",
+                ICON_FILE,
                 cx,
                 |player, window, cx| {
                     player.open_queue_picker(window, cx);
                 },
             ))
-            .child(simple_menu_action(
+            .child(simple_menu_action_with_icon(
                 "Open Folder",
+                ICON_FOLDER,
                 cx,
                 |player, window, cx| {
                     player.open_folder_picker(window, cx);
@@ -7075,10 +7076,10 @@ impl WatchPlayer {
             .when(is_queue_open, |menu| {
                 menu.child(self.render_queue_selector(cx))
             })
-            .child(simple_menu_action("Library", cx, |player, window, cx| {
+            .child(simple_menu_action_with_icon("Library", ICON_GLOBE, cx, |player, window, cx| {
                 player.reveal_library_mode(window, cx);
             }))
-            .child(simple_menu_action("Settings", cx, |player, window, cx| {
+            .child(simple_menu_action_with_icon("Settings", ICON_SETTINGS, cx, |player, window, cx| {
                 player.open_settings_modal(window, cx);
             }))
     }
@@ -7132,9 +7133,7 @@ impl WatchPlayer {
             .top(px(menu_top))
             .w(px(CONTEXT_MENU_WIDTH))
             .p_2()
-            .bg(self
-                .settings
-                .surface_background_color(MENU_BLACK, BACKDROP_BLUR_MENU_BACKGROUND_ALPHA))
+            .bg(rgb_alpha(0x0a0a0a, 0.95))
             .rounded_sm()
             .border_1()
             .border_color(rgb(BRIGHT_BORDER))
@@ -7148,39 +7147,50 @@ impl WatchPlayer {
                     div()
                         .flex()
                         .items_center()
-                        .gap_2()
-                        .child(context_icon_button(
-                            "context-play",
-                            if self.is_playing {
-                                ICON_PAUSE
-                            } else {
-                                ICON_PLAY
-                            },
-                            "Play or pause",
-                            cx,
-                            |player, window, cx| {
-                                player.toggle_playback(&TogglePlayback, window, cx);
-                            },
-                        ))
-                        .child(context_icon_button(
-                            "context-previous",
-                            ICON_PREVIOUS,
-                            "Previous queue item",
-                            cx,
-                            |player, window, cx| {
-                                player.play_previous_queue_item(window, cx);
-                            },
-                        ))
-                        .child(context_icon_button(
-                            "context-next",
-                            ICON_NEXT,
-                            "Next queue item",
-                            cx,
-                            |player, window, cx| {
-                                player.play_next_queue_item(window, cx);
-                            },
-                        ))
-                        .child(div().flex_1())
+                        .justify_between()
+                        .p_1p5()
+                        .mb_1()
+                        .bg(rgb(PLAYER_BLACK))
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(rgb(FINE_BORDER))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(context_icon_button(
+                                    "context-play",
+                                    if self.is_playing {
+                                        ICON_PAUSE
+                                    } else {
+                                        ICON_PLAY
+                                    },
+                                    "Play or pause",
+                                    cx,
+                                    |player, window, cx| {
+                                        player.toggle_playback(&TogglePlayback, window, cx);
+                                    },
+                                ))
+                                .child(context_icon_button(
+                                    "context-previous",
+                                    ICON_PREVIOUS,
+                                    "Previous queue item",
+                                    cx,
+                                    |player, window, cx| {
+                                        player.play_previous_queue_item(window, cx);
+                                    },
+                                ))
+                                .child(context_icon_button(
+                                    "context-next",
+                                    ICON_NEXT,
+                                    "Next queue item",
+                                    cx,
+                                    |player, window, cx| {
+                                        player.play_next_queue_item(window, cx);
+                                    },
+                                )),
+                        )
                         .child(self.render_playback_mode_toggles("context-menu", cx)),
                 )
             })
@@ -8505,11 +8515,7 @@ impl WatchPlayer {
             .flex()
             .items_center()
             .justify_center()
-            .bg(if self.settings.is_backdrop_blur_enabled {
-                rgb_alpha(OLED_BLACK, BACKDROP_BLUR_MODAL_BACKDROP_ALPHA)
-            } else {
-                rgb_alpha(OLED_BLACK, 0.78)
-            })
+            .bg(rgb_alpha(OLED_BLACK, 0.92))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|player, _event, _window, cx| {
@@ -9985,27 +9991,6 @@ impl Render for WatchPlayer {
         let viewport_height = viewport_size.height.as_f32();
         let is_video_surface_active = self.is_video_surface_active();
 
-        let should_blur = (self.is_settings_modal_open
-            || self.is_source_search_open
-            || self.is_main_menu_open
-            || self.is_subtitle_menu_open
-            || self.is_live_capture_menu_open
-            || self.open_settings_selector.is_some()
-            || self.open_context_menu_section.is_some()
-            || self.library_context_menu_media_path.is_some())
-            && self.settings.is_backdrop_blur_enabled;
-
-        if self.last_applied_blur_state != Some(should_blur) {
-            self.last_applied_blur_state = Some(should_blur);
-            if self.is_video_surface_active() {
-                if should_blur {
-                    self.send_mpv_command(json!(["set_property", "vf", "lavfi=[gblur=sigma=12]"]));
-                } else {
-                    self.send_mpv_command(json!(["set_property", "vf", ""]));
-                }
-            }
-        }
-
         let should_show_blurred_library_backdrop =
             self.settings.is_backdrop_blur_enabled && self.is_library_surface_visible();
         let active_key_context = if self.is_source_search_open || self.is_settings_modal_open {
@@ -10365,6 +10350,40 @@ fn scaled_menu_message(message: &'static str, menu_scale: f32) -> Div {
         .child(message)
 }
 
+fn simple_menu_action_with_icon(
+    label: &'static str,
+    icon_path: &'static str,
+    cx: &mut Context<WatchPlayer>,
+    on_click: impl Fn(&mut WatchPlayer, &mut Window, &mut Context<WatchPlayer>) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(format!("simple-menu-action-{label}"))
+        .flex()
+        .items_center()
+        .gap_2()
+        .px_2()
+        .py_1()
+        .text_sm()
+        .rounded_sm()
+        .cursor_pointer()
+        .hover(|menu_item| menu_item.bg(rgb(0x121212)))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |player, _event, window, cx| {
+                on_click(player, window, cx);
+                cx.stop_propagation();
+            }),
+        )
+        .child(
+            svg()
+                .external_path(crate::icon_path(icon_path))
+                .w(px(14.0))
+                .h(px(14.0))
+                .text_color(rgb(MUTED_TEXT)),
+        )
+        .child(label)
+}
+
 fn simple_menu_action(
     label: &'static str,
     cx: &mut Context<WatchPlayer>,
@@ -10429,11 +10448,15 @@ fn context_section_button(
                 ),
         )
         .child(
-            div()
+            svg()
+                .external_path(crate::icon_path(if is_open {
+                    ICON_CHEVRON_DOWN
+                } else {
+                    ICON_CHEVRON_RIGHT
+                }))
                 .w(px(12.0))
-                .text_xs()
-                .text_color(rgb(MUTED_TEXT))
-                .child(if is_open { "v" } else { ">" }),
+                .h(px(12.0))
+                .text_color(rgb(MUTED_TEXT)),
         )
 }
 
